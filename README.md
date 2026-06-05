@@ -2,16 +2,16 @@
 
 Read-only FreePBX module that pairs customer PBX boxes with the hosted Jointtechs Voice Portal.
 
-This repository is intended to be cloned directly into a FreePBX module directory:
+FreePBX Module Admin upload/download accepts archives such as `.tgz` and `.zip`, not a `.git` URL. Use the release archive URL when pasting a URL into Module Admin:
 
 ```bash
-fwconsole ma downloadinstall git@github.com:aandrtechs/jointtechs-freepbx-connector.git
+fwconsole ma downloadinstall https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.1.0/jointtechsconnector-0.1.0.tgz
 fwconsole ma install jointtechsconnector
 fwconsole ma enable jointtechsconnector
 fwconsole reload
 ```
 
-If installing manually:
+If installing manually from Git:
 
 ```bash
 cd /var/www/html/admin/modules
@@ -19,6 +19,12 @@ git clone https://github.com/aandrtechs/jointtechs-freepbx-connector.git jointte
 fwconsole ma install jointtechsconnector
 fwconsole ma enable jointtechsconnector
 fwconsole reload
+```
+
+If installing from the FreePBX web UI, paste this URL into Module Admin's upload/download URL field:
+
+```text
+https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.1.0/jointtechsconnector-0.1.0.tgz
 ```
 
 V1 behavior:
