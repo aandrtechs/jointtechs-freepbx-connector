@@ -5,7 +5,7 @@ Read-only FreePBX module that pairs customer PBX boxes with the hosted Jointtech
 FreePBX Module Admin upload/download accepts archives such as `.tgz` and `.zip`, not a `.git` URL. Use the release archive URL when pasting a URL into Module Admin:
 
 ```bash
-fwconsole ma downloadinstall https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.2.1/jointtechsconnector-0.2.1.tgz
+fwconsole ma downloadinstall https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.2.2/jointtechsconnector-0.2.2.tgz
 fwconsole ma install jointtechsconnector
 fwconsole ma enable jointtechsconnector
 fwconsole reload
@@ -24,12 +24,14 @@ fwconsole reload
 If installing from the FreePBX web UI, paste this URL into Module Admin's upload/download URL field:
 
 ```text
-https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.2.1/jointtechsconnector-0.2.1.tgz
+https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.2.2/jointtechsconnector-0.2.2.tgz
 ```
 
 V1 behavior:
 
-- Admin enters portal URL and pairing code.
+- Admin enters only the portal-generated pairing code in normal use.
+- Portal URL defaults to `https://portal.joint.tech`.
+- Connector public URL is inferred from the PBX hostname/request host and can be overridden in Advanced settings.
 - Module calls `POST /api/pbx/pair`.
 - Portal returns PBX ID and token.
 - Module stores token locally.
@@ -39,6 +41,7 @@ V1 behavior:
 - Connector is read-only in v1.
 - Connector uses outbound HTTPS for pairing/sync and signed inbound HTTPS for portal-triggered actions/playback.
 - v0.2.1 reads recent rows from `asteriskcdrdb.cdr`, maps native CDR columns, and sends recording file paths when available.
+- v0.2.2 simplifies pairing and receives portal-triggered signed actions through FreePBX `admin/ajax.php` because direct module PHP files may be blocked by Apache.
 
 Target assumptions:
 

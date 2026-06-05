@@ -5,7 +5,8 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '0.2.1';
+    private const MODULE_VERSION = '0.2.2';
+    private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
 
     public function install()
     {
@@ -40,13 +41,17 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 
     public function ajaxRequest($req, &$setting)
     {
-        return in_array($req, ['pair'], true);
+        return in_array($req, ['pair', 'action'], true);
     }
 
     public function ajaxHandler()
     {
         try {
             $command = $_REQUEST['command'] ?? '';
+            if ($command === 'action') {
+                return $this->handleAjaxAction(file_get_contents('php://input'), $this->requestHeaders());
+            }
+
             if ($command !== 'pair') {
                 return ['status' => false, 'message' => _('Unknown command')];
             }
@@ -58,6 +63,12 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
                 'message' => _('Pairing failed. Check the portal URL, pairing code, and outbound HTTPS access, then try again.'),
             ];
         }
+    }
+
+    private function handleAjaxAction($body, array $headers)
+    {
+        $result = $this->executeInboundAction((string) $body, $headers, false);
+        return is_array($result) ? $result : ['status' => false, 'message' => _('Action failed.')];
     }
 
     public function runHeartbeatCli()
@@ -104,8 +115,8 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 
     private function pairWithPortal($portalUrl, $pairingCode, $connectorUrl, $recordingsPath)
     {
-        $portalUrl = rtrim(trim((string) $portalUrl), '/');
-        $connectorUrl = rtrim(trim((string) $connectorUrl), '/');
+        $portalUrl = rtrim(trim((string) $portalUrl), '/') ?: self::DEFAULT_PORTAL_URL;
+        $connectorUrl = rtrim(trim((string) $connectorUrl), '/') ?: $this->inferConnectorUrl();
         $pairingCode = trim((string) $pairingCode);
         $recordingsPath = rtrim(trim((string) $recordingsPath), '/') ?: '/var/spool/asterisk/monitor';
 
@@ -115,6 +126,10 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 
         if (!preg_match('/^https:\/\//i', $portalUrl)) {
             return ['status' => false, 'message' => _('Portal URL must use HTTPS.')];
+        }
+
+        if ($connectorUrl && rtrim($connectorUrl, '/') === rtrim($portalUrl, '/')) {
+            return ['status' => false, 'message' => _('Connector URL must be the PBX URL, not the portal URL.')];
         }
 
         if ($pairingCode === '') {
@@ -164,25 +179,51 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 
     public function handleInboundAction($body, array $headers)
     {
+        $result = $this->executeInboundAction((string) $body, $headers, true);
+        if ($result === true) return true;
+        $payload = is_array($result) ? $result : ['status' => false, 'error' => 'Action failed.'];
+        return $this->jsonResponse($payload, !empty($payload['status']) ? 200 : 400);
+    }
+
+    private function executeInboundAction($body, array $headers, $allowStreaming)
+    {
         try {
             $config = $this->getConnectorConfig();
             if (empty($config['actionSecret']) || !$this->verifyActionSignature($body, $headers, $config)) {
-                return $this->jsonResponse(['error' => 'Unauthorized action request.'], 401);
+                return ['status' => false, 'error' => 'Unauthorized action request.'];
             }
             $decoded = json_decode($body, true);
             if (!is_array($decoded) || empty($decoded['command'])) {
-                return $this->jsonResponse(['error' => 'Invalid action request.'], 400);
+                return ['status' => false, 'error' => 'Invalid action request.'];
             }
             $payload = isset($decoded['payload']) && is_array($decoded['payload']) ? $decoded['payload'] : [];
-            if ($decoded['command'] === 'heartbeat') return $this->jsonResponse($this->sendHeartbeat());
-            if ($decoded['command'] === 'sync_calls') return $this->jsonResponse($this->syncCalls());
-            if ($decoded['command'] === 'sync_recordings') return $this->jsonResponse($this->syncRecordings());
-            if ($decoded['command'] === 'refresh_recording') return $this->jsonResponse($this->refreshRecording($payload));
-            if ($decoded['command'] === 'stream_recording') return $this->streamRecording($payload);
-            return $this->jsonResponse(['error' => 'Unsupported action command.'], 400);
+            if ($decoded['command'] === 'heartbeat') return $this->actionSuccess($this->sendHeartbeat());
+            if ($decoded['command'] === 'sync_calls') return $this->actionSuccess($this->syncCalls());
+            if ($decoded['command'] === 'sync_recordings') return $this->actionSuccess($this->syncRecordings());
+            if ($decoded['command'] === 'refresh_recording') return $this->actionSuccess($this->refreshRecording($payload));
+            if ($decoded['command'] === 'stream_recording' && $allowStreaming) return $this->streamRecording($payload);
+            return ['status' => false, 'error' => 'Unsupported action command.'];
         } catch (\Throwable $exception) {
-            return $this->jsonResponse(['error' => 'Action failed.'], 500);
+            return ['status' => false, 'error' => 'Action failed.'];
         }
+    }
+
+    private function actionSuccess(array $payload)
+    {
+        $payload['status'] = true;
+        return $payload;
+    }
+
+    private function requestHeaders()
+    {
+        $headers = [];
+        foreach ($_SERVER as $key => $value) {
+            if (strpos($key, 'HTTP_') === 0) {
+                $name = strtolower(str_replace('_', '-', substr($key, 5)));
+                $headers[$name] = $value;
+            }
+        }
+        return $headers;
     }
 
     private function verifyActionSignature($body, array $headers, array $config)
@@ -387,6 +428,14 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $hostname = php_uname('n');
         $ip = $hostname ? gethostbyname($hostname) : null;
         return $ip && $ip !== $hostname ? $ip : null;
+    }
+
+    private function inferConnectorUrl()
+    {
+        $host = $_SERVER['HTTP_HOST'] ?? php_uname('n');
+        $host = preg_replace('/[^A-Za-z0-9.\-:]/', '', (string) $host);
+        if (!$host || $host === 'localhost') return '';
+        return 'https://' . $host;
     }
 
     private function postPortal($path, array $payload)

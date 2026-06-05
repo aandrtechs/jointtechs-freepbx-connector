@@ -2,14 +2,15 @@
 <module>
   <rawname>jointtechsconnector</rawname>
   <name>Jointtechs Connector</name>
-  <version>0.2.1</version>
+  <version>0.2.2</version>
   <category>Connectivity</category>
   <publisher>Jointtechs</publisher>
   <license>GPLv3+</license>
   <licenselink>https://www.gnu.org/licenses/gpl-3.0.txt</licenselink>
   <info>https://portal.joint.tech</info>
   <description>Read-only outbound connector for the Jointtechs hosted voice portal.</description>
-  <changelog>*0.2.1* Read recent FreePBX CDR rows, map native CDR fields, send recording paths, and make CLI sync workers functional.
+  <changelog>*0.2.2* Simplify pairing to pairing-code-first, auto-detect PBX public URL, default portal URL, and route signed portal actions through FreePBX ajax.php.
+*0.2.1* Read recent FreePBX CDR rows, map native CDR fields, send recording paths, and make CLI sync workers functional.
 *0.2.0* Add signed inbound read-only actions for portal-triggered heartbeat, sync, recording metadata refresh, and recording streaming.
 *0.1.2* Fix install/uninstall returns, use FreePBX module config storage, sanitize AJAX pairing errors, and render pairing results inline.
 *0.1.1* Implement real HTTPS pairing and move AJAX handlers into the main module class.

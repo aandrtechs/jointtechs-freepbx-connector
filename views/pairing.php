@@ -7,10 +7,26 @@ $config = FreePBX::Jointtechsconnector()->getConnectorConfig();
   <div class="element-container">
     <div class="row">
       <div class="col-md-3">
+        <label class="control-label" for="pairingCode"><?php echo _("Pairing Code"); ?></label>
+      </div>
+      <div class="col-md-9">
+        <input class="form-control input-lg" id="pairingCode" name="pairingCode" type="text" placeholder="ABCDEF-123456" required autofocus>
+        <span class="help-block"><?php echo _("Get this code from the Jointtechs portal customer PBX page."); ?></span>
+      </div>
+    </div>
+  </div>
+  <p>
+    <button class="btn btn-link" type="button" data-toggle="collapse" data-target="#jointtechsconnector-advanced"><?php echo _("Advanced settings"); ?></button>
+  </p>
+  <div id="jointtechsconnector-advanced" class="collapse">
+  <div class="element-container">
+    <div class="row">
+      <div class="col-md-3">
         <label class="control-label" for="portalUrl"><?php echo _("Portal URL"); ?></label>
       </div>
       <div class="col-md-9">
         <input class="form-control" id="portalUrl" name="portalUrl" type="url" value="<?php echo htmlspecialchars($config['portalUrl'] ?: 'https://portal.joint.tech', ENT_QUOTES); ?>" required>
+        <span class="help-block"><?php echo _("Usually leave this as the Jointtechs hosted portal."); ?></span>
       </div>
     </div>
   </div>
@@ -21,7 +37,7 @@ $config = FreePBX::Jointtechsconnector()->getConnectorConfig();
       </div>
       <div class="col-md-9">
         <input class="form-control" id="connectorUrl" name="connectorUrl" type="url" value="<?php echo htmlspecialchars($config['connectorUrl'] ?? '', ENT_QUOTES); ?>" placeholder="https://pbx.example.com">
-        <span class="help-block"><?php echo _("Required for portal-triggered sync and recording playback."); ?></span>
+        <span class="help-block"><?php echo _("Usually auto-detected from this PBX hostname. Override only if the public PBX URL is different."); ?></span>
       </div>
     </div>
   </div>
@@ -36,15 +52,6 @@ $config = FreePBX::Jointtechsconnector()->getConnectorConfig();
       </div>
     </div>
   </div>
-  <div class="element-container">
-    <div class="row">
-      <div class="col-md-3">
-        <label class="control-label" for="pairingCode"><?php echo _("Pairing Code"); ?></label>
-      </div>
-      <div class="col-md-9">
-        <input class="form-control" id="pairingCode" name="pairingCode" type="text" placeholder="ABCDEF-123456" required>
-      </div>
-    </div>
   </div>
   <button id="jointtechsconnector-pair-button" class="btn btn-primary" type="submit"><?php echo _("Pair PBX"); ?></button>
 </form>
