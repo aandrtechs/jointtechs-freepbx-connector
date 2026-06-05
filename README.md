@@ -5,7 +5,7 @@ Read-only FreePBX module that pairs customer PBX boxes with the hosted Jointtech
 FreePBX Module Admin upload/download accepts archives such as `.tgz` and `.zip`, not a `.git` URL. Use the release archive URL when pasting a URL into Module Admin:
 
 ```bash
-fwconsole ma downloadinstall https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.1.1/jointtechsconnector-0.1.1.tgz
+fwconsole ma downloadinstall https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.1.2/jointtechsconnector-0.1.2.tgz
 fwconsole ma install jointtechsconnector
 fwconsole ma enable jointtechsconnector
 fwconsole reload
@@ -24,7 +24,7 @@ fwconsole reload
 If installing from the FreePBX web UI, paste this URL into Module Admin's upload/download URL field:
 
 ```text
-https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.1.1/jointtechsconnector-0.1.1.tgz
+https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.1.2/jointtechsconnector-0.1.2.tgz
 ```
 
 V1 behavior:

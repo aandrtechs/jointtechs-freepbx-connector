@@ -2,14 +2,15 @@
 <module>
   <rawname>jointtechsconnector</rawname>
   <name>Jointtechs Connector</name>
-  <version>0.1.1</version>
+  <version>0.1.2</version>
   <category>Connectivity</category>
   <publisher>Jointtechs</publisher>
   <license>GPLv3+</license>
   <licenselink>https://www.gnu.org/licenses/gpl-3.0.txt</licenselink>
   <info>https://portal.joint.tech</info>
   <description>Read-only outbound connector for the Jointtechs hosted voice portal.</description>
-  <changelog>*0.1.1* Implement real HTTPS pairing and move AJAX handlers into the main module class.
+  <changelog>*0.1.2* Fix install/uninstall returns, use FreePBX module config storage, sanitize AJAX pairing errors, and render pairing results inline.
+*0.1.1* Implement real HTTPS pairing and move AJAX handlers into the main module class.
 *0.1.0* Initial read-only pairing, heartbeat, CDR sync, and recording metadata sync scaffold.</changelog>
   <menuitems>
     <jointtechsconnector sort="90">Jointtechs Connector</jointtechsconnector>

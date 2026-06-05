@@ -5,7 +5,7 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '0.1.1';
+    private const MODULE_VERSION = '0.1.2';
 
     public function install()
     {
@@ -45,17 +45,24 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 
     public function ajaxHandler()
     {
-        $command = $_REQUEST['command'] ?? '';
-        if ($command !== 'pair') {
-            return ['status' => false, 'message' => _('Unknown command')];
-        }
+        try {
+            $command = $_REQUEST['command'] ?? '';
+            if ($command !== 'pair') {
+                return ['status' => false, 'message' => _('Unknown command')];
+            }
 
-        return $this->pairWithPortal($_POST['portalUrl'] ?? '', $_POST['pairingCode'] ?? '');
+            return $this->pairWithPortal($_POST['portalUrl'] ?? '', $_POST['pairingCode'] ?? '');
+        } catch (\Throwable $exception) {
+            return [
+                'status' => false,
+                'message' => _('Pairing failed. Check the portal URL, pairing code, and outbound HTTPS access, then try again.'),
+            ];
+        }
     }
 
     public function getConnectorConfig()
     {
-        $raw = $this->FreePBX->Config->get(self::CONFIG_KEY);
+        $raw = $this->getConfig(self::CONFIG_KEY);
         if (!$raw) {
             return [
                 'portalUrl' => '',
@@ -73,7 +80,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 
     public function setConnectorConfig(array $config)
     {
-        $this->FreePBX->Config->set(self::CONFIG_KEY, json_encode($config));
+        $this->setConfig(self::CONFIG_KEY, json_encode($config));
     }
 
     private function pairWithPortal($portalUrl, $pairingCode)
@@ -105,7 +112,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 
         $response = $this->postJson($portalUrl . '/api/pbx/pair', $payload);
         if (!$response['ok']) {
-            return ['status' => false, 'message' => $response['message']];
+            return ['status' => false, 'message' => $this->sanitizeMessage($response['message'])];
         }
 
         $body = json_decode($response['body'], true);
@@ -153,7 +160,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             curl_close($ch);
 
             if ($body === false) {
-                return ['ok' => false, 'message' => sprintf(_('Pairing request failed: %s'), $error ?: _('unknown error')), 'body' => ''];
+                return ['ok' => false, 'message' => sprintf(_('Pairing request failed: %s'), $this->sanitizeMessage($error ?: _('unknown error'))), 'body' => ''];
             }
 
             return $this->formatPortalResponse($statusCode, $body);
@@ -192,10 +199,18 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 
         $decoded = json_decode($body, true);
         $message = is_array($decoded) && !empty($decoded['error'])
-            ? (string) $decoded['error']
+            ? $this->sanitizeMessage((string) $decoded['error'])
             : sprintf(_('Portal pairing failed with HTTP %d.'), $statusCode);
 
         return ['ok' => false, 'message' => $message, 'body' => $body];
+    }
+
+    private function sanitizeMessage($message)
+    {
+        $message = (string) $message;
+        $message = preg_replace('/(token|authorization|pairingCode|pairing_code)(["\']?\s*[:=]\s*["\']?)[^"\'\s,}]+/i', '$1$2[redacted]', $message);
+        $message = preg_replace('/Bearer\s+[A-Za-z0-9._~+\/=-]+/i', 'Bearer [redacted]', $message);
+        return $message ?: _('Pairing failed.');
     }
 
     private function getFreePbxVersion()
