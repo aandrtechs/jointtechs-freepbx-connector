@@ -5,7 +5,7 @@ Read-only FreePBX module that pairs customer PBX boxes with the hosted Jointtech
 FreePBX Module Admin upload/download accepts archives such as `.tgz` and `.zip`, not a `.git` URL. Use the release archive URL when pasting a URL into Module Admin:
 
 ```bash
-fwconsole ma downloadinstall https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.3.0/jointtechsconnector-0.3.0.tgz
+fwconsole ma downloadinstall https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.3.1/jointtechsconnector-0.3.1.tgz
 fwconsole ma install jointtechsconnector
 fwconsole ma enable jointtechsconnector
 fwconsole reload
@@ -24,7 +24,7 @@ fwconsole reload
 If installing from the FreePBX web UI, paste this URL into Module Admin's upload/download URL field:
 
 ```text
-https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.3.0/jointtechsconnector-0.3.0.tgz
+https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.3.1/jointtechsconnector-0.3.1.tgz
 ```
 
 V1 behavior:
@@ -43,6 +43,7 @@ V1 behavior:
 - v0.2.1 reads recent rows from `asteriskcdrdb.cdr`, maps native CDR columns, and sends recording file paths when available.
 - v0.2.2 simplifies pairing and receives portal-triggered signed actions through FreePBX `admin/ajax.php` because direct module PHP files may be blocked by Apache.
 - v0.3.0 auto-registers on install and discovers hostname, connector URL, local IP, versions, CDR columns, and recording path.
+- v0.3.1 sends approved recording bytes to the portal over the signed action channel so the portal can play/download from a 10-minute temporary cache.
 
 Target assumptions:
 

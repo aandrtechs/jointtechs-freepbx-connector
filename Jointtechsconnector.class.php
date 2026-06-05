@@ -5,7 +5,7 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '0.3.0';
+    private const MODULE_VERSION = '0.3.1';
     private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
 
     public function install()
@@ -262,6 +262,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             if ($decoded['command'] === 'sync_calls') return $this->actionSuccess($this->syncCalls());
             if ($decoded['command'] === 'sync_recordings') return $this->actionSuccess($this->syncRecordings());
             if ($decoded['command'] === 'refresh_recording') return $this->actionSuccess($this->refreshRecording($payload));
+            if ($decoded['command'] === 'fetch_recording') return $this->actionSuccess($this->fetchRecording($payload));
             if ($decoded['command'] === 'stream_recording' && $allowStreaming) return $this->streamRecording($payload);
             return ['status' => false, 'error' => 'Unsupported action command.'];
         } catch (\Throwable $exception) {
@@ -375,6 +376,29 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         header('Cache-Control: no-store');
         readfile($path);
         return true;
+    }
+
+    private function fetchRecording(array $payload)
+    {
+        $path = $this->safeRecordingPath($payload['filePath'] ?? '');
+        if (!$path || !is_file($path) || !is_readable($path)) {
+            return ['status' => false, 'error' => 'Recording not available.'];
+        }
+        $size = filesize($path);
+        if ($size !== false && $size > 50 * 1024 * 1024) {
+            return ['status' => false, 'error' => 'Recording is too large for temporary playback cache.'];
+        }
+        $content = file_get_contents($path);
+        if ($content === false) {
+            return ['status' => false, 'error' => 'Recording could not be read.'];
+        }
+        return [
+            'ok' => true,
+            'fileName' => basename($path),
+            'fileSizeBytes' => $size,
+            'contentType' => $this->recordingContentType($path),
+            'contentBase64' => base64_encode($content),
+        ];
     }
 
     private function safeRecordingPath($path)
