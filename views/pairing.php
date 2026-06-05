@@ -1,5 +1,5 @@
 <?php
-$config = FreePBX::Jointtechsconnector()->getConfig();
+$config = FreePBX::Jointtechsconnector()->getConnectorConfig();
 ?>
 <h2>Jointtechs Connector Pairing</h2>
 <form autocomplete="off" method="post" action="ajax.php?module=jointtechsconnector&amp;command=pair">
