@@ -1,11 +1,11 @@
 # Jointtechs FreePBX Connector
 
-Read-only FreePBX module that pairs customer PBX boxes with the hosted Jointtechs Voice Portal.
+Signed FreePBX module that registers customer PBX boxes with the hosted Jointtechs Voice Portal and acts as a stable PBX agent.
 
 FreePBX Module Admin upload/download accepts archives such as `.tgz` and `.zip`, not a `.git` URL. Use the release archive URL when pasting a URL into Module Admin:
 
 ```bash
-fwconsole ma downloadinstall https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.3.1/jointtechsconnector-0.3.1.tgz
+fwconsole ma downloadinstall https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v1.0.0/jointtechsconnector-1.0.0.tgz
 fwconsole ma install jointtechsconnector
 fwconsole ma enable jointtechsconnector
 fwconsole reload
@@ -24,10 +24,10 @@ fwconsole reload
 If installing from the FreePBX web UI, paste this URL into Module Admin's upload/download URL field:
 
 ```text
-https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.3.1/jointtechsconnector-0.3.1.tgz
+https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v1.0.0/jointtechsconnector-1.0.0.tgz
 ```
 
-V1 behavior:
+V1.0 behavior:
 
 - Module auto-registers with `https://portal.joint.tech` during install/config load.
 - Portal lists the PBX under `Unassigned PBX Boxes`.
@@ -35,10 +35,16 @@ V1 behavior:
 - Optional pairing-code flow remains available as a backup.
 - Portal returns PBX ID, token, and action secret.
 - Module stores token locally.
+- Portal-triggered work runs through a signed task runner instead of hardcoded one-off actions.
+- Supported signed tasks include `discover_system`, `sync_calls_dynamic`, `sync_recordings_deep`, `tail_log`, `list_path`, `fetch_file`, `command_probe`, and `self_update`.
+- Dynamic CDR sync introspects the CDR schema before reading rows, so standard and lightly customized CDR tables are easier to support without reinstalling the module.
+- Recording discovery scans known monitor paths and links metadata by CDR `recordingfile`, unique ID, filename, timestamp, caller, and destination where available.
+- Diagnostics are read-only and sanitized. The module redacts secrets before returning task output.
+- Self-update requires a release URL plus SHA-256 verification before running `fwconsole ma downloadinstall`.
 - `bin/heartbeat.php` sends PBX/Asterisk/module versions, hostname, disk status, and last sync status.
 - `bin/sync-calls.php` reads recent Asterisk CDR records and posts them to `/api/pbx/sync/calls`.
 - `bin/sync-recordings.php` reads recording metadata and posts it to `/api/pbx/sync/recordings`.
-- Connector is read-only in v1.
+- Connector is read-only plus explicitly approved framework fixes in v1.
 - Connector uses outbound HTTPS for pairing/sync and signed inbound HTTPS for portal-triggered actions/playback.
 - v0.2.1 reads recent rows from `asteriskcdrdb.cdr`, maps native CDR columns, and sends recording file paths when available.
 - v0.2.2 simplifies pairing and receives portal-triggered signed actions through FreePBX `admin/ajax.php` because direct module PHP files may be blocked by Apache.

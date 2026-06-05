@@ -5,7 +5,7 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '0.3.1';
+    private const MODULE_VERSION = '1.0.0';
     private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
 
     public function install()
@@ -259,6 +259,8 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             }
             $payload = isset($decoded['payload']) && is_array($decoded['payload']) ? $decoded['payload'] : [];
             if ($decoded['command'] === 'heartbeat') return $this->actionSuccess($this->sendHeartbeat());
+            if ($decoded['command'] === 'run_task') return $this->actionSuccess($this->runAgentTask($payload));
+            if ($decoded['command'] === 'self_update') return $this->actionSuccess($this->selfUpdate($payload));
             if ($decoded['command'] === 'sync_calls') return $this->actionSuccess($this->syncCalls());
             if ($decoded['command'] === 'sync_recordings') return $this->actionSuccess($this->syncRecordings());
             if ($decoded['command'] === 'refresh_recording') return $this->actionSuccess($this->refreshRecording($payload));
@@ -329,6 +331,185 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $config['recordingsPath'] = $recordingsPath;
         $this->setConnectorConfig($config);
         return ['ok' => true, 'heartbeat' => $payload];
+    }
+
+    private function runAgentTask(array $payload)
+    {
+        $command = $payload['command'] ?? '';
+        $permission = $payload['permission'] ?? 'read';
+        $input = isset($payload['input']) && is_array($payload['input']) ? $payload['input'] : [];
+        if (!in_array($permission, ['read', 'approved_fix', 'self_update'], true)) {
+            return ['status' => false, 'errorCode' => 'permission_invalid', 'error' => 'Invalid task permission.'];
+        }
+        if ($permission !== 'read' && $command !== 'self_update') {
+            return ['status' => false, 'errorCode' => 'write_denied', 'error' => 'Only allowlisted approved fixes are supported.'];
+        }
+        if ($command === 'discover_system') return ['ok' => true, 'discovery' => $this->discoverSystem()];
+        if ($command === 'sync_calls_dynamic') return $this->syncCallsDynamic($input);
+        if ($command === 'sync_recordings_deep') return $this->syncRecordingsDeep($input);
+        if ($command === 'tail_log') return $this->tailApprovedLog($input);
+        if ($command === 'list_path') return $this->listApprovedPath($input);
+        if ($command === 'fetch_file') return $this->fetchApprovedFile($input);
+        if ($command === 'command_probe') return $this->runCommandProbe($input);
+        if ($command === 'self_update') return $this->selfUpdate($input);
+        return ['status' => false, 'errorCode' => 'task_unknown', 'error' => 'Unsupported agent task.'];
+    }
+
+    private function discoverSystem()
+    {
+        $config = $this->getConnectorConfig();
+        $recordingsPath = $this->detectRecordingsPath($config);
+        return [
+            'hostname' => php_uname('n') ?: null,
+            'localIp' => $this->getLocalIp(),
+            'phpVersion' => PHP_VERSION,
+            'freepbxVersion' => $this->getFreePbxVersion(),
+            'asteriskVersion' => $this->getAsteriskVersion(),
+            'moduleVersion' => self::MODULE_VERSION,
+            'connectorUrl' => $config['connectorUrl'] ?? $this->inferConnectorUrl(),
+            'recordingsPath' => $recordingsPath,
+            'timezone' => date_default_timezone_get(),
+            'diskUsagePercent' => $this->diskUsagePercent('/'),
+            'recordingDiskUsagePercent' => $this->diskUsagePercent($recordingsPath),
+            'cdr' => $this->discoverCdr(),
+            'recordingPaths' => $this->discoverRecordingPaths(),
+            'logPaths' => $this->approvedLogPaths(),
+            'commandProbes' => array_keys($this->approvedCommandProbes()),
+            'capabilities' => ['read_db_schema', 'read_cdr', 'scan_recordings', 'tail_logs', 'fetch_approved_files', 'self_update'],
+        ];
+    }
+
+    private function discoverCdr()
+    {
+        try {
+            $pdo = $this->getCdrPdo();
+            return ['available' => true, 'columns' => $this->getCdrColumns($pdo), 'tables' => $this->getDatabaseTables($pdo)];
+        } catch (\Throwable $exception) {
+            return ['available' => false, 'error' => $this->sanitizeMessage($exception->getMessage())];
+        }
+    }
+
+    private function getDatabaseTables(\PDO $pdo)
+    {
+        $tables = [];
+        foreach ($pdo->query('SHOW TABLES') as $row) {
+            $tables[] = array_values($row)[0];
+        }
+        return $tables;
+    }
+
+    private function syncCallsDynamic(array $input)
+    {
+        $config = $this->getConnectorConfig();
+        $calls = $this->readRecentCdrRowsWithInput($config, $input);
+        $this->postPortal('/api/pbx/sync/calls', ['calls' => $calls]);
+        $config['lastCallSyncAt'] = gmdate('c');
+        $this->setConnectorConfig($config);
+        return ['ok' => true, 'count' => count($calls), 'message' => count($calls) . ' dynamic CDR rows synced.', 'cdr' => $this->discoverCdr()];
+    }
+
+    private function syncRecordingsDeep(array $input)
+    {
+        $config = $this->getConnectorConfig();
+        $limit = max(1, min((int)($input['limit'] ?? 1000), 5000));
+        $recordings = [];
+        foreach ($this->discoverRecordingPaths() as $path) {
+            if (!is_dir($path)) continue;
+            $iterator = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($path, \FilesystemIterator::SKIP_DOTS));
+            foreach ($iterator as $file) {
+                if (count($recordings) >= $limit) break 2;
+                if ($file->isFile() && preg_match('/\.(wav|mp3|gsm|ogg|m4a)$/i', $file->getFilename())) {
+                    $recordings[] = ['filePath' => $file->getPathname(), 'fileName' => $file->getFilename(), 'fileSizeBytes' => $file->getSize(), 'format' => strtolower($file->getExtension()), 'recordingStartedAt' => gmdate('c', $file->getMTime())];
+                }
+            }
+        }
+        $this->postPortal('/api/pbx/sync/recordings', ['recordings' => $recordings]);
+        $config['lastRecordingSyncAt'] = gmdate('c');
+        $this->setConnectorConfig($config);
+        return ['ok' => true, 'count' => count($recordings), 'message' => count($recordings) . ' recording metadata rows synced.', 'paths' => $this->discoverRecordingPaths()];
+    }
+
+    private function readRecentCdrRowsWithInput(array $config, array $input)
+    {
+        $pdo = $this->getCdrPdo();
+        $columns = $this->getCdrColumns($pdo);
+        if (empty($columns) || !in_array('calldate', $columns, true)) return [];
+        $wanted = ['calldate', 'clid', 'src', 'dst', 'dcontext', 'channel', 'dstchannel', 'lastapp', 'lastdata', 'duration', 'billsec', 'disposition', 'amaflags', 'accountcode', 'uniqueid', 'userfield', 'recordingfile', 'cnum', 'cnam', 'outbound_cnum', 'outbound_cnam', 'did', 'linkedid', 'peeraccount', 'sequence'];
+        $selected = array_values(array_intersect($wanted, $columns));
+        $selectSql = implode(', ', array_map(function ($column) { return '`' . str_replace('`', '', $column) . '`'; }, $selected));
+        $limit = max(1, min((int)($input['limit'] ?? 1000), 5000));
+        $lookbackDays = max(1, min((int)($input['lookbackDays'] ?? 14), 365));
+        $since = gmdate('Y-m-d H:i:s', time() - 86400 * $lookbackDays);
+        if (!empty($config['lastCallSyncAt'])) {
+            $time = strtotime((string) $config['lastCallSyncAt']);
+            if ($time) $since = gmdate('Y-m-d H:i:s', $time - 3600);
+        }
+        $stmt = $pdo->prepare("SELECT {$selectSql} FROM cdr WHERE calldate >= :since ORDER BY calldate DESC LIMIT {$limit}");
+        $stmt->execute(['since' => $since]);
+        $calls = [];
+        while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) $calls[] = $this->mapCdrRow($row, $config);
+        return $calls;
+    }
+
+    private function tailApprovedLog(array $input)
+    {
+        $path = $this->approvedPath($input['path'] ?? '/var/log/asterisk/full', $this->approvedLogPaths());
+        if (!$path || !is_file($path) || !is_readable($path)) return ['status' => false, 'errorCode' => 'log_unreadable', 'error' => 'Log path is not approved or readable.'];
+        $lines = max(1, min((int)($input['lines'] ?? 200), 1000));
+        $output = '';
+        if (function_exists('exec')) @exec('tail -n ' . (int)$lines . ' ' . escapeshellarg($path) . ' 2>&1', $out, $code);
+        $output = isset($out) ? implode("\n", $out) : '';
+        return ['ok' => true, 'path' => $path, 'stdout' => $this->sanitizeMessage($output)];
+    }
+
+    private function listApprovedPath(array $input)
+    {
+        $approved = array_merge($this->discoverRecordingPaths(), ['/var/log/asterisk', '/var/log/freepbx']);
+        $path = $this->approvedPath($input['path'] ?? '/var/spool/asterisk/monitor', $approved);
+        if (!$path || !is_dir($path)) return ['status' => false, 'errorCode' => 'path_unreadable', 'error' => 'Path is not approved or readable.'];
+        $limit = max(1, min((int)($input['limit'] ?? 200), 1000));
+        $items = [];
+        foreach (new \DirectoryIterator($path) as $file) {
+            if ($file->isDot()) continue;
+            if (count($items) >= $limit) break;
+            $items[] = ['name' => $file->getFilename(), 'path' => $file->getPathname(), 'type' => $file->isDir() ? 'dir' : 'file', 'size' => $file->isFile() ? $file->getSize() : null, 'modifiedAt' => gmdate('c', $file->getMTime())];
+        }
+        return ['ok' => true, 'path' => $path, 'items' => $items];
+    }
+
+    private function fetchApprovedFile(array $input)
+    {
+        $approved = array_merge($this->approvedLogPaths(), $this->discoverRecordingPaths());
+        $path = $this->approvedPath($input['path'] ?? '', $approved);
+        if (!$path || !is_file($path) || !is_readable($path)) return ['status' => false, 'errorCode' => 'file_unreadable', 'error' => 'File is not approved or readable.'];
+        if (filesize($path) > 2 * 1024 * 1024) return ['status' => false, 'errorCode' => 'file_too_large', 'error' => 'File is too large.'];
+        return ['ok' => true, 'path' => $path, 'contentBase64' => base64_encode(file_get_contents($path)), 'encoding' => 'base64'];
+    }
+
+    private function runCommandProbe(array $input)
+    {
+        $probes = $this->approvedCommandProbes();
+        $name = (string)($input['probe'] ?? '');
+        if (!isset($probes[$name])) return ['status' => false, 'errorCode' => 'probe_denied', 'error' => 'Probe is not approved.'];
+        @exec($probes[$name] . ' 2>&1', $output, $code);
+        return ['ok' => $code === 0, 'probe' => $name, 'exitCode' => $code, 'stdout' => $this->sanitizeMessage(implode("\n", $output))];
+    }
+
+    private function selfUpdate(array $input)
+    {
+        $url = (string)($input['releaseUrl'] ?? '');
+        $expectedSha256 = strtolower((string)($input['expectedSha256'] ?? ''));
+        if (!preg_match('/^https:\/\/github\.com\/aandrtechs\/jointtechs-freepbx-connector\/releases\/download\/v[0-9.]+\/jointtechsconnector-[0-9.]+\.tgz$/', $url)) {
+            return ['status' => false, 'errorCode' => 'update_url_denied', 'error' => 'Release URL is not approved.'];
+        }
+        if ($expectedSha256 === '') return ['status' => false, 'errorCode' => 'checksum_required', 'error' => 'Expected SHA256 is required for self-update.'];
+        $tmp = '/tmp/jointtechsconnector-update-' . time() . '.tgz';
+        @exec('curl -fsSL ' . escapeshellarg($url) . ' -o ' . escapeshellarg($tmp) . ' 2>&1', $downloadOutput, $downloadCode);
+        if ($downloadCode !== 0 || !is_file($tmp)) return ['status' => false, 'errorCode' => 'download_failed', 'error' => 'Could not download release.', 'stderr' => $this->sanitizeMessage(implode("\n", $downloadOutput))];
+        $actual = hash_file('sha256', $tmp);
+        if (!hash_equals($expectedSha256, strtolower($actual))) return ['status' => false, 'errorCode' => 'checksum_mismatch', 'error' => 'Release checksum mismatch.'];
+        @exec('fwconsole ma downloadinstall ' . escapeshellarg($tmp) . ' 2>&1 && fwconsole reload 2>&1', $output, $code);
+        return ['ok' => $code === 0, 'exitCode' => $code, 'stdout' => $this->sanitizeMessage(implode("\n", $output))];
     }
 
     private function syncCalls()
@@ -546,6 +727,57 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             if ($candidate && is_dir($candidate)) return rtrim($candidate, '/');
         }
         return '/var/spool/asterisk/monitor';
+    }
+
+    private function discoverRecordingPaths()
+    {
+        $paths = ['/var/spool/asterisk/monitor', '/var/spool/asterisk/monitorDONE', '/var/lib/asterisk/sounds/recordings'];
+        $config = $this->getConnectorConfig();
+        if (!empty($config['recordingsPath'])) array_unshift($paths, $config['recordingsPath']);
+        $existing = [];
+        foreach (array_unique($paths) as $path) {
+            if ($path && is_dir($path)) $existing[] = rtrim($path, '/');
+        }
+        return $existing ?: ['/var/spool/asterisk/monitor'];
+    }
+
+    private function approvedLogPaths()
+    {
+        return array_values(array_filter([
+            '/var/log/asterisk/full',
+            '/var/log/asterisk/messages',
+            '/var/log/asterisk/freepbx.log',
+            '/var/log/freepbx/freepbx.log',
+            '/var/log/httpd/error_log',
+            '/var/log/apache2/error.log',
+        ], function ($path) { return file_exists($path) || is_dir(dirname($path)); }));
+    }
+
+    private function approvedCommandProbes()
+    {
+        return [
+            'fwconsole_version' => 'fwconsole --version',
+            'fwconsole_ma_list' => 'fwconsole ma list',
+            'asterisk_version' => 'asterisk -rx "core show version"',
+            'disk_usage' => 'df -h',
+            'memory' => 'free -m',
+            'uptime' => 'uptime',
+        ];
+    }
+
+    private function approvedPath($requested, array $approvedBases)
+    {
+        $requested = (string)$requested;
+        if ($requested === '') return null;
+        $real = realpath($requested);
+        if (!$real) return null;
+        foreach ($approvedBases as $base) {
+            $baseReal = realpath($base);
+            if (!$baseReal && is_file($base)) $baseReal = realpath(dirname($base));
+            if (!$baseReal) continue;
+            if ($real === $baseReal || strpos($real, rtrim($baseReal, '/') . '/') === 0) return $real;
+        }
+        return null;
     }
 
     private function safeCdrColumns()
