@@ -1,0 +1,65 @@
+# Jointtechs FreePBX Connector
+
+Read-only FreePBX module that pairs customer PBX boxes with the hosted Jointtechs Voice Portal.
+
+This repository is intended to be cloned directly into a FreePBX module directory:
+
+```bash
+fwconsole ma downloadinstall git@github.com:aandrtechs/jointtechs-freepbx-connector.git
+fwconsole ma install jointtechsconnector
+fwconsole ma enable jointtechsconnector
+fwconsole reload
+```
+
+If installing manually:
+
+```bash
+cd /var/www/html/admin/modules
+git clone https://github.com/aandrtechs/jointtechs-freepbx-connector.git jointtechsconnector
+fwconsole ma install jointtechsconnector
+fwconsole ma enable jointtechsconnector
+fwconsole reload
+```
+
+V1 behavior:
+
+- Admin enters portal URL and pairing code.
+- Module calls `POST /api/pbx/pair`.
+- Portal returns PBX ID and token.
+- Module stores token locally.
+- `bin/heartbeat.php` sends PBX/Asterisk/module versions, hostname, disk status, and last sync status.
+- `bin/sync-calls.php` reads recent Asterisk CDR records and posts them to `/api/pbx/sync/calls`.
+- `bin/sync-recordings.php` reads recording metadata and posts it to `/api/pbx/sync/recordings`.
+- Connector is read-only in v1.
+- Connector uses outbound HTTPS only.
+
+Target assumptions:
+
+- FreePBX 17 on Debian 12 with PHP 8.2 and Asterisk 20/21.
+- FreePBX 16+ where practical.
+- CDR for v1 call history.
+- CEL and AMI reserved for later phases.
+
+## Module Metadata
+
+The module descriptor uses:
+
+- `rawname`: `jointtechsconnector`
+- `name`: `Jointtechs Connector`
+- `category`: `Connectivity`
+- `publisher`: `Jointtechs`
+- `license`: `GPLv3+`
+- `supported`: `16.0`
+- Requirements: `core`, `cdr`
+
+## Files
+
+- `module.xml`: FreePBX Module Admin descriptor.
+- `Jointtechsconnector.class.php`: BMO module class and config storage helper.
+- `page.jointtechsconnector.php`: FreePBX admin page entry.
+- `views/pairing.php`: Pairing form.
+- `ajax.php`: AJAX command scaffold.
+- `bin/heartbeat.php`: Heartbeat worker scaffold.
+- `bin/sync-calls.php`: CDR sync worker scaffold.
+- `bin/sync-recordings.php`: Recording metadata sync worker scaffold.
+- `config.example.json`: Example local connector config shape.

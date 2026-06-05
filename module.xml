@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module>
+  <rawname>jointtechsconnector</rawname>
+  <name>Jointtechs Connector</name>
+  <version>0.1.0</version>
+  <category>Connectivity</category>
+  <publisher>Jointtechs</publisher>
+  <license>GPLv3+</license>
+  <licenselink>https://www.gnu.org/licenses/gpl-3.0.txt</licenselink>
+  <info>https://portal.joint.tech</info>
+  <description>Read-only outbound connector for the Jointtechs hosted voice portal.</description>
+  <changelog>*0.1.0* Initial read-only pairing, heartbeat, CDR sync, and recording metadata sync scaffold.</changelog>
+  <menuitems>
+    <jointtechsconnector sort="90">Jointtechs Connector</jointtechsconnector>
+  </menuitems>
+  <depends>
+    <version>16.0</version>
+  </depends>
+  <requirements>
+    <module>core</module>
+    <module>cdr</module>
+  </requirements>
+  <supported>16.0</supported>
+</module>
