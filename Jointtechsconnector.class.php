@@ -5,11 +5,16 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '0.2.2';
+    private const MODULE_VERSION = '0.3.0';
     private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
 
     public function install()
     {
+        try {
+            $this->autoRegisterWithPortal();
+        } catch (\Throwable $exception) {
+            // Installation should not fail if outbound HTTPS is temporarily unavailable.
+        }
         return true;
     }
 
@@ -36,6 +41,11 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 
     public function doConfigPageInit($page)
     {
+        try {
+            $this->autoRegisterWithPortal();
+        } catch (\Throwable $exception) {
+            // The config page can still render if registration is not available yet.
+        }
         return true;
     }
 
@@ -73,16 +83,19 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 
     public function runHeartbeatCli()
     {
+        $this->autoRegisterWithPortal();
         return $this->sendHeartbeat();
     }
 
     public function runCallSyncCli()
     {
+        $this->autoRegisterWithPortal();
         return $this->syncCalls();
     }
 
     public function runRecordingSyncCli()
     {
+        $this->autoRegisterWithPortal();
         return $this->syncRecordings();
     }
 
@@ -177,6 +190,54 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         ];
     }
 
+    private function autoRegisterWithPortal()
+    {
+        $config = $this->getConnectorConfig();
+        if (!empty($config['pbxId']) && !empty($config['token']) && !empty($config['actionSecret'])) {
+            return $config;
+        }
+
+        $portalUrl = rtrim($config['portalUrl'] ?? self::DEFAULT_PORTAL_URL, '/') ?: self::DEFAULT_PORTAL_URL;
+        $recordingsPath = $this->detectRecordingsPath($config);
+        $connectorUrl = rtrim($config['connectorUrl'] ?? '', '/') ?: $this->inferConnectorUrl();
+        $payload = $this->systemPayload($connectorUrl, $recordingsPath);
+        $response = $this->postJson($portalUrl . '/api/pbx/register', $payload);
+        if (!$response['ok']) {
+            throw new \RuntimeException('Auto-registration failed.');
+        }
+        $body = json_decode($response['body'], true);
+        if (!is_array($body) || empty($body['pbxId']) || empty($body['token']) || empty($body['actionSecret'])) {
+            throw new \RuntimeException('Portal returned an invalid registration response.');
+        }
+
+        $config['portalUrl'] = $portalUrl;
+        $config['pbxId'] = (string) $body['pbxId'];
+        $config['token'] = (string) $body['token'];
+        $config['actionSecret'] = (string) $body['actionSecret'];
+        $config['connectorUrl'] = $connectorUrl;
+        $config['recordingsPath'] = $recordingsPath;
+        $config['registeredAt'] = gmdate('c');
+        $config['moduleVersion'] = self::MODULE_VERSION;
+        $this->setConnectorConfig($config);
+        return $config;
+    }
+
+    private function systemPayload($connectorUrl, $recordingsPath)
+    {
+        return [
+            'name' => php_uname('n') ?: 'FreePBX Box',
+            'hostname' => php_uname('n') ?: null,
+            'connectorUrl' => $connectorUrl ?: null,
+            'recordingsPath' => $recordingsPath,
+            'localIp' => $this->getLocalIp(),
+            'freepbxVersion' => $this->getFreePbxVersion(),
+            'asteriskVersion' => $this->getAsteriskVersion(),
+            'moduleVersion' => self::MODULE_VERSION,
+            'timezone' => date_default_timezone_get(),
+            'cdrColumns' => implode(',', $this->safeCdrColumns()),
+        ];
+    }
+
     public function handleInboundAction($body, array $headers)
     {
         $result = $this->executeInboundAction((string) $body, $headers, true);
@@ -248,6 +309,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
     private function sendHeartbeat()
     {
         $config = $this->getConnectorConfig();
+        $recordingsPath = $this->detectRecordingsPath($config);
         $payload = [
             'hostname' => php_uname('n') ?: null,
             'localIp' => $this->getLocalIp(),
@@ -255,13 +317,15 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             'asteriskVersion' => $this->getAsteriskVersion(),
             'moduleVersion' => self::MODULE_VERSION,
             'connectorUrl' => $config['connectorUrl'] ?? null,
-            'recordingsPath' => $config['recordingsPath'] ?? '/var/spool/asterisk/monitor',
+            'recordingsPath' => $recordingsPath,
             'timezone' => date_default_timezone_get(),
             'diskUsagePercent' => $this->diskUsagePercent('/'),
-            'recordingDiskUsagePercent' => $this->diskUsagePercent($config['recordingsPath'] ?? '/var/spool/asterisk/monitor'),
+            'recordingDiskUsagePercent' => $this->diskUsagePercent($recordingsPath),
+            'cdrColumns' => $this->safeCdrColumns(),
         ];
         $this->postPortal('/api/pbx/heartbeat', $payload);
         $config['lastHeartbeatAt'] = gmdate('c');
+        $config['recordingsPath'] = $recordingsPath;
         $this->setConnectorConfig($config);
         return ['ok' => true, 'heartbeat' => $payload];
     }
@@ -279,7 +343,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
     private function syncRecordings()
     {
         $config = $this->getConnectorConfig();
-        $path = $config['recordingsPath'] ?? '/var/spool/asterisk/monitor';
+        $path = $this->detectRecordingsPath($config);
         $recordings = [];
         if (is_dir($path)) {
             $iterator = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($path, \FilesystemIterator::SKIP_DOTS));
@@ -425,9 +489,19 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 
     private function getLocalIp()
     {
+        if (function_exists('exec')) {
+            @exec('hostname -I 2>/dev/null', $output, $code);
+            if ($code === 0 && !empty($output[0])) {
+                foreach (preg_split('/\s+/', trim($output[0])) as $candidate) {
+                    if (filter_var($candidate, FILTER_VALIDATE_IP) && strpos($candidate, '127.') !== 0) {
+                        return $candidate;
+                    }
+                }
+            }
+        }
         $hostname = php_uname('n');
         $ip = $hostname ? gethostbyname($hostname) : null;
-        return $ip && $ip !== $hostname ? $ip : null;
+        return $ip && $ip !== $hostname && strpos($ip, '127.') !== 0 ? $ip : null;
     }
 
     private function inferConnectorUrl()
@@ -436,6 +510,28 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $host = preg_replace('/[^A-Za-z0-9.\-:]/', '', (string) $host);
         if (!$host || $host === 'localhost') return '';
         return 'https://' . $host;
+    }
+
+    private function detectRecordingsPath(array $config)
+    {
+        $candidates = [];
+        if (!empty($config['recordingsPath'])) $candidates[] = $config['recordingsPath'];
+        $candidates[] = '/var/spool/asterisk/monitor';
+        $candidates[] = '/var/spool/asterisk/monitorDONE';
+        foreach ($candidates as $candidate) {
+            if ($candidate && is_dir($candidate)) return rtrim($candidate, '/');
+        }
+        return '/var/spool/asterisk/monitor';
+    }
+
+    private function safeCdrColumns()
+    {
+        try {
+            $pdo = $this->getCdrPdo();
+            return $this->getCdrColumns($pdo);
+        } catch (\Throwable $exception) {
+            return [];
+        }
     }
 
     private function postPortal($path, array $payload)

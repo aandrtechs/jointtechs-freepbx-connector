@@ -5,7 +5,7 @@ Read-only FreePBX module that pairs customer PBX boxes with the hosted Jointtech
 FreePBX Module Admin upload/download accepts archives such as `.tgz` and `.zip`, not a `.git` URL. Use the release archive URL when pasting a URL into Module Admin:
 
 ```bash
-fwconsole ma downloadinstall https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.2.2/jointtechsconnector-0.2.2.tgz
+fwconsole ma downloadinstall https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.3.0/jointtechsconnector-0.3.0.tgz
 fwconsole ma install jointtechsconnector
 fwconsole ma enable jointtechsconnector
 fwconsole reload
@@ -24,16 +24,16 @@ fwconsole reload
 If installing from the FreePBX web UI, paste this URL into Module Admin's upload/download URL field:
 
 ```text
-https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.2.2/jointtechsconnector-0.2.2.tgz
+https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.3.0/jointtechsconnector-0.3.0.tgz
 ```
 
 V1 behavior:
 
-- Admin enters only the portal-generated pairing code in normal use.
-- Portal URL defaults to `https://portal.joint.tech`.
-- Connector public URL is inferred from the PBX hostname/request host and can be overridden in Advanced settings.
-- Module calls `POST /api/pbx/pair`.
-- Portal returns PBX ID and token.
+- Module auto-registers with `https://portal.joint.tech` during install/config load.
+- Portal lists the PBX under `Unassigned PBX Boxes`.
+- Jointtechs assigns the PBX to the correct customer from `/admin/pbx`.
+- Optional pairing-code flow remains available as a backup.
+- Portal returns PBX ID, token, and action secret.
 - Module stores token locally.
 - `bin/heartbeat.php` sends PBX/Asterisk/module versions, hostname, disk status, and last sync status.
 - `bin/sync-calls.php` reads recent Asterisk CDR records and posts them to `/api/pbx/sync/calls`.
@@ -42,6 +42,7 @@ V1 behavior:
 - Connector uses outbound HTTPS for pairing/sync and signed inbound HTTPS for portal-triggered actions/playback.
 - v0.2.1 reads recent rows from `asteriskcdrdb.cdr`, maps native CDR columns, and sends recording file paths when available.
 - v0.2.2 simplifies pairing and receives portal-triggered signed actions through FreePBX `admin/ajax.php` because direct module PHP files may be blocked by Apache.
+- v0.3.0 auto-registers on install and discovers hostname, connector URL, local IP, versions, CDR columns, and recording path.
 
 Target assumptions:
 
