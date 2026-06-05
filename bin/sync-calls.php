@@ -1,2 +1,7 @@
+#!/usr/bin/env php
 <?php
-// Starter only. Read recent CDR rows and POST normalized call records to /api/pbx/sync/calls.
+
+require_once('/etc/freepbx.conf');
+
+$result = FreePBX::Jointtechsconnector()->runCallSyncCli();
+echo json_encode($result, JSON_PRETTY_PRINT) . PHP_EOL;

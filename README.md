@@ -5,7 +5,7 @@ Read-only FreePBX module that pairs customer PBX boxes with the hosted Jointtech
 FreePBX Module Admin upload/download accepts archives such as `.tgz` and `.zip`, not a `.git` URL. Use the release archive URL when pasting a URL into Module Admin:
 
 ```bash
-fwconsole ma downloadinstall https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.2.0/jointtechsconnector-0.2.0.tgz
+fwconsole ma downloadinstall https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.2.1/jointtechsconnector-0.2.1.tgz
 fwconsole ma install jointtechsconnector
 fwconsole ma enable jointtechsconnector
 fwconsole reload
@@ -24,7 +24,7 @@ fwconsole reload
 If installing from the FreePBX web UI, paste this URL into Module Admin's upload/download URL field:
 
 ```text
-https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.2.0/jointtechsconnector-0.2.0.tgz
+https://github.com/aandrtechs/jointtechs-freepbx-connector/releases/download/v0.2.1/jointtechsconnector-0.2.1.tgz
 ```
 
 V1 behavior:
@@ -37,7 +37,8 @@ V1 behavior:
 - `bin/sync-calls.php` reads recent Asterisk CDR records and posts them to `/api/pbx/sync/calls`.
 - `bin/sync-recordings.php` reads recording metadata and posts it to `/api/pbx/sync/recordings`.
 - Connector is read-only in v1.
-- Connector uses outbound HTTPS for pairing/sync and signed inbound HTTPS for portal-triggered actions/playback in v0.2.0.
+- Connector uses outbound HTTPS for pairing/sync and signed inbound HTTPS for portal-triggered actions/playback.
+- v0.2.1 reads recent rows from `asteriskcdrdb.cdr`, maps native CDR columns, and sends recording file paths when available.
 
 Target assumptions:
 
@@ -65,7 +66,7 @@ The module descriptor uses:
 - `page.jointtechsconnector.php`: FreePBX admin page entry.
 - `views/pairing.php`: Pairing form.
 - `ajax.php`: FreePBX AJAX entry marker; command handlers live on the main module class.
-- `bin/heartbeat.php`: Heartbeat worker scaffold.
-- `bin/sync-calls.php`: CDR sync worker scaffold.
-- `bin/sync-recordings.php`: Recording metadata sync worker scaffold.
+- `bin/heartbeat.php`: Heartbeat worker.
+- `bin/sync-calls.php`: CDR sync worker.
+- `bin/sync-recordings.php`: Recording metadata sync worker.
 - `config.example.json`: Example local connector config shape.

@@ -28,6 +28,17 @@ $config = FreePBX::Jointtechsconnector()->getConnectorConfig();
   <div class="element-container">
     <div class="row">
       <div class="col-md-3">
+        <label class="control-label" for="recordingsPath"><?php echo _("Recordings Path"); ?></label>
+      </div>
+      <div class="col-md-9">
+        <input class="form-control" id="recordingsPath" name="recordingsPath" type="text" value="<?php echo htmlspecialchars($config['recordingsPath'] ?? '/var/spool/asterisk/monitor', ENT_QUOTES); ?>">
+        <span class="help-block"><?php echo _("Usually /var/spool/asterisk/monitor on FreePBX."); ?></span>
+      </div>
+    </div>
+  </div>
+  <div class="element-container">
+    <div class="row">
+      <div class="col-md-3">
         <label class="control-label" for="pairingCode"><?php echo _("Pairing Code"); ?></label>
       </div>
       <div class="col-md-9">

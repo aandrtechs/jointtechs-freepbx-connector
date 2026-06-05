@@ -5,7 +5,7 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '0.2.0';
+    private const MODULE_VERSION = '0.2.1';
 
     public function install()
     {
@@ -51,13 +51,28 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
                 return ['status' => false, 'message' => _('Unknown command')];
             }
 
-            return $this->pairWithPortal($_POST['portalUrl'] ?? '', $_POST['pairingCode'] ?? '', $_POST['connectorUrl'] ?? '');
+            return $this->pairWithPortal($_POST['portalUrl'] ?? '', $_POST['pairingCode'] ?? '', $_POST['connectorUrl'] ?? '', $_POST['recordingsPath'] ?? '');
         } catch (\Throwable $exception) {
             return [
                 'status' => false,
                 'message' => _('Pairing failed. Check the portal URL, pairing code, and outbound HTTPS access, then try again.'),
             ];
         }
+    }
+
+    public function runHeartbeatCli()
+    {
+        return $this->sendHeartbeat();
+    }
+
+    public function runCallSyncCli()
+    {
+        return $this->syncCalls();
+    }
+
+    public function runRecordingSyncCli()
+    {
+        return $this->syncRecordings();
     }
 
     public function getConnectorConfig()
@@ -87,11 +102,12 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $this->setConfig(self::CONFIG_KEY, json_encode($config));
     }
 
-    private function pairWithPortal($portalUrl, $pairingCode, $connectorUrl)
+    private function pairWithPortal($portalUrl, $pairingCode, $connectorUrl, $recordingsPath)
     {
         $portalUrl = rtrim(trim((string) $portalUrl), '/');
         $connectorUrl = rtrim(trim((string) $connectorUrl), '/');
         $pairingCode = trim((string) $pairingCode);
+        $recordingsPath = rtrim(trim((string) $recordingsPath), '/') ?: '/var/spool/asterisk/monitor';
 
         if ($portalUrl === '' || !filter_var($portalUrl, FILTER_VALIDATE_URL)) {
             return ['status' => false, 'message' => _('Enter a valid portal URL.')];
@@ -110,6 +126,8 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             'name' => php_uname('n') ?: 'FreePBX Box',
             'hostname' => php_uname('n') ?: null,
             'connectorUrl' => $connectorUrl ?: null,
+            'recordingsPath' => $recordingsPath,
+            'localIp' => $this->getLocalIp(),
             'freepbxVersion' => $this->getFreePbxVersion(),
             'asteriskVersion' => $this->getAsteriskVersion(),
             'moduleVersion' => self::MODULE_VERSION,
@@ -132,6 +150,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $config['token'] = (string) $body['token'];
         $config['actionSecret'] = (string) $body['actionSecret'];
         $config['connectorUrl'] = $connectorUrl;
+        $config['recordingsPath'] = $recordingsPath;
         $config['pairedAt'] = gmdate('c');
         $config['moduleVersion'] = self::MODULE_VERSION;
         $this->setConnectorConfig($config);
@@ -190,9 +209,13 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $config = $this->getConnectorConfig();
         $payload = [
             'hostname' => php_uname('n') ?: null,
+            'localIp' => $this->getLocalIp(),
             'freepbxVersion' => $this->getFreePbxVersion(),
             'asteriskVersion' => $this->getAsteriskVersion(),
             'moduleVersion' => self::MODULE_VERSION,
+            'connectorUrl' => $config['connectorUrl'] ?? null,
+            'recordingsPath' => $config['recordingsPath'] ?? '/var/spool/asterisk/monitor',
+            'timezone' => date_default_timezone_get(),
             'diskUsagePercent' => $this->diskUsagePercent('/'),
             'recordingDiskUsagePercent' => $this->diskUsagePercent($config['recordingsPath'] ?? '/var/spool/asterisk/monitor'),
         ];
@@ -205,10 +228,11 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
     private function syncCalls()
     {
         $config = $this->getConnectorConfig();
-        $this->postPortal('/api/pbx/sync/calls', ['calls' => []]);
+        $calls = $this->readRecentCdrRows($config);
+        $this->postPortal('/api/pbx/sync/calls', ['calls' => $calls]);
         $config['lastCallSyncAt'] = gmdate('c');
         $this->setConnectorConfig($config);
-        return ['ok' => true, 'count' => 0, 'message' => 'CDR sync transport verified.'];
+        return ['ok' => true, 'count' => count($calls), 'message' => 'CDR rows synced.'];
     }
 
     private function syncRecordings()
@@ -255,6 +279,114 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $real = realpath((string) $path);
         if (!$base || !$real || strpos($real, $base) !== 0) return null;
         return $real;
+    }
+
+    private function readRecentCdrRows(array $config)
+    {
+        $pdo = $this->getCdrPdo();
+        $columns = $this->getCdrColumns($pdo);
+        if (empty($columns) || !in_array('calldate', $columns, true)) {
+            return [];
+        }
+
+        $wanted = ['calldate', 'clid', 'src', 'dst', 'dcontext', 'channel', 'dstchannel', 'lastapp', 'lastdata', 'duration', 'billsec', 'disposition', 'amaflags', 'accountcode', 'uniqueid', 'userfield', 'recordingfile', 'cnum', 'cnam', 'outbound_cnum', 'outbound_cnam', 'did', 'linkedid', 'peeraccount', 'sequence'];
+        $selected = array_values(array_intersect($wanted, $columns));
+        $selectSql = implode(', ', array_map(function ($column) { return '`' . str_replace('`', '', $column) . '`'; }, $selected));
+        $since = $this->cdrSince($config);
+        $stmt = $pdo->prepare("SELECT {$selectSql} FROM cdr WHERE calldate >= :since ORDER BY calldate DESC LIMIT 250");
+        $stmt->execute(['since' => $since]);
+
+        $calls = [];
+        while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) {
+            $calls[] = $this->mapCdrRow($row, $config);
+        }
+        return $calls;
+    }
+
+    private function getCdrPdo()
+    {
+        global $amp_conf;
+        $host = $amp_conf['AMPDBHOST'] ?? 'localhost';
+        $user = $amp_conf['AMPDBUSER'] ?? 'freepbxuser';
+        $pass = $amp_conf['AMPDBPASS'] ?? '';
+        $database = $amp_conf['CDRDBNAME'] ?? 'asteriskcdrdb';
+        $dsn = 'mysql:host=' . $host . ';dbname=' . $database . ';charset=utf8mb4';
+        return new \PDO($dsn, $user, $pass, [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION, \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC]);
+    }
+
+    private function getCdrColumns(\PDO $pdo)
+    {
+        $stmt = $pdo->query('SHOW COLUMNS FROM cdr');
+        $columns = [];
+        while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) {
+            if (!empty($row['Field'])) $columns[] = $row['Field'];
+        }
+        return $columns;
+    }
+
+    private function cdrSince(array $config)
+    {
+        if (!empty($config['lastCallSyncAt'])) {
+            $time = strtotime((string) $config['lastCallSyncAt']);
+            if ($time) return gmdate('Y-m-d H:i:s', $time - 3600);
+        }
+        return gmdate('Y-m-d H:i:s', time() - 86400 * 7);
+    }
+
+    private function mapCdrRow(array $row, array $config)
+    {
+        $recordingFile = $row['recordingfile'] ?? null;
+        $recordingPath = $recordingFile ? $this->findRecordingPath($recordingFile, $row['calldate'] ?? null, $config) : null;
+        return [
+            'asteriskUniqueId' => $row['uniqueid'] ?? null,
+            'linkedId' => $row['linkedid'] ?? null,
+            'calldate' => $row['calldate'] ?? null,
+            'clid' => $row['clid'] ?? null,
+            'src' => $row['src'] ?? null,
+            'dst' => $row['dst'] ?? null,
+            'did' => $row['did'] ?? null,
+            'dcontext' => $row['dcontext'] ?? null,
+            'channel' => $row['channel'] ?? null,
+            'dstchannel' => $row['dstchannel'] ?? null,
+            'lastapp' => $row['lastapp'] ?? null,
+            'lastdata' => $row['lastdata'] ?? null,
+            'duration' => isset($row['duration']) ? (int) $row['duration'] : null,
+            'billsec' => isset($row['billsec']) ? (int) $row['billsec'] : null,
+            'disposition' => $row['disposition'] ?? null,
+            'cnum' => $row['cnum'] ?? null,
+            'cnam' => $row['cnam'] ?? null,
+            'outbound_cnum' => $row['outbound_cnum'] ?? null,
+            'outbound_cnam' => $row['outbound_cnam'] ?? null,
+            'recordingAvailable' => (bool) ($recordingFile || $recordingPath),
+            'recordingFile' => $recordingFile,
+            'recordingFilePath' => $recordingPath,
+            'rawCdr' => $row,
+        ];
+    }
+
+    private function findRecordingPath($recordingFile, $calldate, array $config)
+    {
+        $recordingFile = trim((string) $recordingFile);
+        if ($recordingFile === '') return null;
+        if ($recordingFile[0] === '/' && is_file($recordingFile)) return $recordingFile;
+        $base = rtrim($config['recordingsPath'] ?? '/var/spool/asterisk/monitor', '/');
+        $candidates = [$base . '/' . $recordingFile];
+        $timestamp = $calldate ? strtotime((string) $calldate) : false;
+        if ($timestamp) {
+            $candidates[] = $base . '/' . gmdate('Y/m/d', $timestamp) . '/' . $recordingFile;
+            $candidates[] = $base . '/' . gmdate('Y/m', $timestamp) . '/' . $recordingFile;
+        }
+        foreach ($candidates as $candidate) {
+            if (is_file($candidate)) return $candidate;
+        }
+        return $candidates[0];
+    }
+
+    private function getLocalIp()
+    {
+        $hostname = php_uname('n');
+        $ip = $hostname ? gethostbyname($hostname) : null;
+        return $ip && $ip !== $hostname ? $ip : null;
     }
 
     private function postPortal($path, array $payload)

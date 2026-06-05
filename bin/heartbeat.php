@@ -1,2 +1,7 @@
+#!/usr/bin/env php
 <?php
-// Starter only. Send hostname, FreePBX version, Asterisk version, module version, disk usage, and last sync status.
+
+require_once('/etc/freepbx.conf');
+
+$result = FreePBX::Jointtechsconnector()->runHeartbeatCli();
+echo json_encode($result, JSON_PRETTY_PRINT) . PHP_EOL;
