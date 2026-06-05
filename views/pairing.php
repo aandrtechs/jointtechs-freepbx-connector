@@ -17,6 +17,17 @@ $config = FreePBX::Jointtechsconnector()->getConnectorConfig();
   <div class="element-container">
     <div class="row">
       <div class="col-md-3">
+        <label class="control-label" for="connectorUrl"><?php echo _("Connector Public URL"); ?></label>
+      </div>
+      <div class="col-md-9">
+        <input class="form-control" id="connectorUrl" name="connectorUrl" type="url" value="<?php echo htmlspecialchars($config['connectorUrl'] ?? '', ENT_QUOTES); ?>" placeholder="https://pbx.example.com">
+        <span class="help-block"><?php echo _("Required for portal-triggered sync and recording playback."); ?></span>
+      </div>
+    </div>
+  </div>
+  <div class="element-container">
+    <div class="row">
+      <div class="col-md-3">
         <label class="control-label" for="pairingCode"><?php echo _("Pairing Code"); ?></label>
       </div>
       <div class="col-md-9">

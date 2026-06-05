@@ -2,6 +2,9 @@
   "portalUrl": "https://portal.joint.tech",
   "pbxId": "",
   "token": "",
+  "actionSecret": "",
+  "connectorUrl": "https://pbx.example.com",
+  "recordingsPath": "/var/spool/asterisk/monitor",
   "lastCallSyncAt": null,
   "lastRecordingSyncAt": null
 }

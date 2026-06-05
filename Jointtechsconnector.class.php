@@ -5,7 +5,7 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '0.1.2';
+    private const MODULE_VERSION = '0.2.0';
 
     public function install()
     {
@@ -51,7 +51,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
                 return ['status' => false, 'message' => _('Unknown command')];
             }
 
-            return $this->pairWithPortal($_POST['portalUrl'] ?? '', $_POST['pairingCode'] ?? '');
+            return $this->pairWithPortal($_POST['portalUrl'] ?? '', $_POST['pairingCode'] ?? '', $_POST['connectorUrl'] ?? '');
         } catch (\Throwable $exception) {
             return [
                 'status' => false,
@@ -68,6 +68,10 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
                 'portalUrl' => '',
                 'pbxId' => '',
                 'token' => '',
+                'actionSecret' => '',
+                'connectorUrl' => '',
+                'recordingsPath' => '/var/spool/asterisk/monitor',
+                'actionNonces' => [],
                 'pairedAt' => null,
                 'lastHeartbeatAt' => null,
                 'lastCallSyncAt' => null,
@@ -83,9 +87,10 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $this->setConfig(self::CONFIG_KEY, json_encode($config));
     }
 
-    private function pairWithPortal($portalUrl, $pairingCode)
+    private function pairWithPortal($portalUrl, $pairingCode, $connectorUrl)
     {
         $portalUrl = rtrim(trim((string) $portalUrl), '/');
+        $connectorUrl = rtrim(trim((string) $connectorUrl), '/');
         $pairingCode = trim((string) $pairingCode);
 
         if ($portalUrl === '' || !filter_var($portalUrl, FILTER_VALIDATE_URL)) {
@@ -104,6 +109,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             'pairingCode' => $pairingCode,
             'name' => php_uname('n') ?: 'FreePBX Box',
             'hostname' => php_uname('n') ?: null,
+            'connectorUrl' => $connectorUrl ?: null,
             'freepbxVersion' => $this->getFreePbxVersion(),
             'asteriskVersion' => $this->getAsteriskVersion(),
             'moduleVersion' => self::MODULE_VERSION,
@@ -116,7 +122,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         }
 
         $body = json_decode($response['body'], true);
-        if (!is_array($body) || empty($body['pbxId']) || empty($body['token'])) {
+        if (!is_array($body) || empty($body['pbxId']) || empty($body['token']) || empty($body['actionSecret'])) {
             return ['status' => false, 'message' => _('Portal returned an invalid pairing response.')];
         }
 
@@ -124,6 +130,8 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $config['portalUrl'] = $portalUrl;
         $config['pbxId'] = (string) $body['pbxId'];
         $config['token'] = (string) $body['token'];
+        $config['actionSecret'] = (string) $body['actionSecret'];
+        $config['connectorUrl'] = $connectorUrl;
         $config['pairedAt'] = gmdate('c');
         $config['moduleVersion'] = self::MODULE_VERSION;
         $this->setConnectorConfig($config);
@@ -133,6 +141,163 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             'message' => _('PBX paired successfully.'),
             'pbxId' => $config['pbxId'],
         ];
+    }
+
+    public function handleInboundAction($body, array $headers)
+    {
+        try {
+            $config = $this->getConnectorConfig();
+            if (empty($config['actionSecret']) || !$this->verifyActionSignature($body, $headers, $config)) {
+                return $this->jsonResponse(['error' => 'Unauthorized action request.'], 401);
+            }
+            $decoded = json_decode($body, true);
+            if (!is_array($decoded) || empty($decoded['command'])) {
+                return $this->jsonResponse(['error' => 'Invalid action request.'], 400);
+            }
+            $payload = isset($decoded['payload']) && is_array($decoded['payload']) ? $decoded['payload'] : [];
+            if ($decoded['command'] === 'heartbeat') return $this->jsonResponse($this->sendHeartbeat());
+            if ($decoded['command'] === 'sync_calls') return $this->jsonResponse($this->syncCalls());
+            if ($decoded['command'] === 'sync_recordings') return $this->jsonResponse($this->syncRecordings());
+            if ($decoded['command'] === 'refresh_recording') return $this->jsonResponse($this->refreshRecording($payload));
+            if ($decoded['command'] === 'stream_recording') return $this->streamRecording($payload);
+            return $this->jsonResponse(['error' => 'Unsupported action command.'], 400);
+        } catch (\Throwable $exception) {
+            return $this->jsonResponse(['error' => 'Action failed.'], 500);
+        }
+    }
+
+    private function verifyActionSignature($body, array $headers, array $config)
+    {
+        $timestamp = $headers['x-jointtechs-timestamp'] ?? '';
+        $nonce = $headers['x-jointtechs-nonce'] ?? '';
+        $signature = $headers['x-jointtechs-signature'] ?? '';
+        $pbxId = $headers['x-jointtechs-pbx-id'] ?? '';
+        if (!$timestamp || !$nonce || !$signature || !$pbxId || $pbxId !== ($config['pbxId'] ?? '')) return false;
+        if (abs(time() - (int) $timestamp) > 300) return false;
+        $nonces = isset($config['actionNonces']) && is_array($config['actionNonces']) ? $config['actionNonces'] : [];
+        $nonces = array_filter($nonces, function ($seenAt) { return (time() - (int) $seenAt) < 600; });
+        if (isset($nonces[$nonce])) return false;
+        $expected = hash_hmac('sha256', $timestamp . '.' . $nonce . '.' . $body, $config['actionSecret']);
+        if (!hash_equals($expected, $signature)) return false;
+        $nonces[$nonce] = time();
+        $config['actionNonces'] = $nonces;
+        $this->setConnectorConfig($config);
+        return true;
+    }
+
+    private function sendHeartbeat()
+    {
+        $config = $this->getConnectorConfig();
+        $payload = [
+            'hostname' => php_uname('n') ?: null,
+            'freepbxVersion' => $this->getFreePbxVersion(),
+            'asteriskVersion' => $this->getAsteriskVersion(),
+            'moduleVersion' => self::MODULE_VERSION,
+            'diskUsagePercent' => $this->diskUsagePercent('/'),
+            'recordingDiskUsagePercent' => $this->diskUsagePercent($config['recordingsPath'] ?? '/var/spool/asterisk/monitor'),
+        ];
+        $this->postPortal('/api/pbx/heartbeat', $payload);
+        $config['lastHeartbeatAt'] = gmdate('c');
+        $this->setConnectorConfig($config);
+        return ['ok' => true, 'heartbeat' => $payload];
+    }
+
+    private function syncCalls()
+    {
+        $config = $this->getConnectorConfig();
+        $this->postPortal('/api/pbx/sync/calls', ['calls' => []]);
+        $config['lastCallSyncAt'] = gmdate('c');
+        $this->setConnectorConfig($config);
+        return ['ok' => true, 'count' => 0, 'message' => 'CDR sync transport verified.'];
+    }
+
+    private function syncRecordings()
+    {
+        $config = $this->getConnectorConfig();
+        $path = $config['recordingsPath'] ?? '/var/spool/asterisk/monitor';
+        $recordings = [];
+        if (is_dir($path)) {
+            $iterator = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($path, \FilesystemIterator::SKIP_DOTS));
+            foreach ($iterator as $file) {
+                if (count($recordings) >= 200) break;
+                if ($file->isFile() && preg_match('/\.(wav|mp3|gsm)$/i', $file->getFilename())) {
+                    $recordings[] = ['filePath' => $file->getPathname(), 'fileName' => $file->getFilename(), 'fileSizeBytes' => $file->getSize(), 'format' => strtolower($file->getExtension()), 'recordingStartedAt' => gmdate('c', $file->getMTime())];
+                }
+            }
+        }
+        $this->postPortal('/api/pbx/sync/recordings', ['recordings' => $recordings]);
+        $config['lastRecordingSyncAt'] = gmdate('c');
+        $this->setConnectorConfig($config);
+        return ['ok' => true, 'count' => count($recordings)];
+    }
+
+    private function refreshRecording(array $payload)
+    {
+        $path = $this->safeRecordingPath($payload['filePath'] ?? '');
+        return ['ok' => (bool) ($path && is_file($path)), 'available' => (bool) ($path && is_file($path)), 'fileSizeBytes' => $path && is_file($path) ? filesize($path) : null, 'lastVerifiedAt' => gmdate('c')];
+    }
+
+    private function streamRecording(array $payload)
+    {
+        $path = $this->safeRecordingPath($payload['filePath'] ?? '');
+        if (!$path || !is_file($path) || !is_readable($path)) return $this->jsonResponse(['error' => 'Recording not available.'], 404);
+        header('Content-Type: ' . $this->recordingContentType($path));
+        header('Content-Length: ' . filesize($path));
+        header('Cache-Control: no-store');
+        readfile($path);
+        return true;
+    }
+
+    private function safeRecordingPath($path)
+    {
+        $config = $this->getConnectorConfig();
+        $base = realpath($config['recordingsPath'] ?? '/var/spool/asterisk/monitor');
+        $real = realpath((string) $path);
+        if (!$base || !$real || strpos($real, $base) !== 0) return null;
+        return $real;
+    }
+
+    private function postPortal($path, array $payload)
+    {
+        $config = $this->getConnectorConfig();
+        if (empty($config['portalUrl']) || empty($config['pbxId']) || empty($config['token'])) throw new \RuntimeException('Connector is not paired.');
+        return $this->postJsonWithHeaders(rtrim($config['portalUrl'], '/') . $path, $payload, ['Authorization: Bearer ' . $config['token'], 'X-PBX-ID: ' . $config['pbxId']]);
+    }
+
+    private function postJsonWithHeaders($url, array $payload, array $headers)
+    {
+        $json = json_encode($payload);
+        $headers = array_merge(['Content-Type: application/json', 'Accept: application/json'], $headers);
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $json, CURLOPT_HTTPHEADER => $headers, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 30, CURLOPT_SSL_VERIFYPEER => true, CURLOPT_SSL_VERIFYHOST => 2]);
+        $body = curl_exec($ch);
+        $statusCode = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+        if ($body === false || $statusCode >= 400) throw new \RuntimeException('Portal request failed.');
+        return $body;
+    }
+
+    private function jsonResponse(array $payload, $statusCode = 200)
+    {
+        http_response_code($statusCode);
+        header('Content-Type: application/json');
+        echo json_encode($payload);
+        return true;
+    }
+
+    private function diskUsagePercent($path)
+    {
+        $total = @disk_total_space($path);
+        $free = @disk_free_space($path);
+        return $total ? (int) round((($total - $free) / $total) * 100) : null;
+    }
+
+    private function recordingContentType($path)
+    {
+        $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+        if ($ext === 'mp3') return 'audio/mpeg';
+        if ($ext === 'gsm') return 'audio/gsm';
+        return 'audio/wav';
     }
 
     private function postJson($url, array $payload)
