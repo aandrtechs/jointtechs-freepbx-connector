@@ -345,6 +345,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             return ['status' => false, 'errorCode' => 'write_denied', 'error' => 'Only allowlisted approved fixes are supported.'];
         }
         if ($command === 'discover_system') return ['ok' => true, 'discovery' => $this->discoverSystem()];
+        if ($command === 'sync_inventory') return $this->syncInventory();
         if ($command === 'sync_calls_dynamic') return $this->syncCallsDynamic($input);
         if ($command === 'sync_recordings_deep') return $this->syncRecordingsDeep($input);
         if ($command === 'tail_log') return $this->tailApprovedLog($input);
@@ -375,8 +376,46 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             'recordingPaths' => $this->discoverRecordingPaths(),
             'logPaths' => $this->approvedLogPaths(),
             'commandProbes' => array_keys($this->approvedCommandProbes()),
-            'capabilities' => ['read_db_schema', 'read_cdr', 'scan_recordings', 'tail_logs', 'fetch_approved_files', 'self_update'],
+            'capabilities' => ['read_db_schema', 'read_cdr', 'scan_recordings', 'sync_inventory', 'tail_logs', 'fetch_approved_files', 'self_update'],
         ];
+    }
+
+    private function syncInventory()
+    {
+        $items = $this->discoverInventory();
+        $this->postPortal('/api/pbx/sync/inventory', ['items' => $items]);
+        return ['ok' => true, 'count' => count($items), 'message' => count($items) . ' PBX inventory items synced.', 'types' => array_values(array_unique(array_map(function ($item) { return $item['type']; }, $items)))];
+    }
+
+    private function discoverInventory()
+    {
+        $items = [];
+        try {
+            $pdo = $this->getAmpPdo();
+            foreach ($this->queryRows($pdo, 'users', ['extension', 'name', 'outboundcid', 'sipname']) as $row) {
+                $extension = (string)($row['extension'] ?? '');
+                if ($extension === '') continue;
+                $items[] = ['type' => 'extension', 'objectId' => $extension, 'extension' => $extension, 'number' => $extension, 'name' => $row['name'] ?? $extension, 'metadata' => $row];
+            }
+            foreach ($this->queryRows($pdo, 'ringgroups', ['grpnum', 'description', 'grplist', 'annmsg_id']) as $row) {
+                $number = (string)($row['grpnum'] ?? '');
+                if ($number === '') continue;
+                $items[] = ['type' => 'ring_group', 'objectId' => $number, 'number' => $number, 'name' => $row['description'] ?? ('Ring Group ' . $number), 'metadata' => $row];
+            }
+            foreach ($this->queryRows($pdo, 'ivr_details', ['id', 'name', 'description', 'announcement']) as $row) {
+                $id = (string)($row['id'] ?? '');
+                if ($id === '') continue;
+                $items[] = ['type' => 'ivr', 'objectId' => $id, 'number' => $id, 'name' => $row['name'] ?? $row['description'] ?? ('IVR ' . $id), 'metadata' => $row];
+            }
+            foreach ($this->queryRows($pdo, 'voicemail_users', ['extension', 'name', 'email', 'pager']) as $row) {
+                $extension = (string)($row['extension'] ?? '');
+                if ($extension === '') continue;
+                $items[] = ['type' => 'voicemail', 'objectId' => $extension, 'extension' => $extension, 'number' => $extension, 'name' => $row['name'] ?? ('Voicemail ' . $extension), 'metadata' => $row];
+            }
+        } catch (\Throwable $exception) {
+            return [['type' => 'sync_error', 'objectId' => 'inventory', 'name' => 'Inventory sync failed', 'metadata' => ['error' => $this->sanitizeMessage($exception->getMessage())]]];
+        }
+        return $items;
     }
 
     private function discoverCdr()
@@ -419,7 +458,8 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             foreach ($iterator as $file) {
                 if (count($recordings) >= $limit) break 2;
                 if ($file->isFile() && preg_match('/\.(wav|mp3|gsm|ogg|m4a)$/i', $file->getFilename())) {
-                    $recordings[] = ['filePath' => $file->getPathname(), 'fileName' => $file->getFilename(), 'fileSizeBytes' => $file->getSize(), 'format' => strtolower($file->getExtension()), 'recordingStartedAt' => gmdate('c', $file->getMTime())];
+                    if ($file->getSize() <= 44) continue;
+                    $recordings[] = ['filePath' => $file->getPathname(), 'fileName' => $file->getFilename(), 'fileSizeBytes' => $file->getSize(), 'format' => strtolower($file->getExtension()), 'durationSeconds' => $this->recordingDurationSeconds($file->getPathname()), 'recordingStartedAt' => gmdate('c', $file->getMTime())];
                 }
             }
         }
@@ -532,7 +572,8 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             foreach ($iterator as $file) {
                 if (count($recordings) >= 200) break;
                 if ($file->isFile() && preg_match('/\.(wav|mp3|gsm)$/i', $file->getFilename())) {
-                    $recordings[] = ['filePath' => $file->getPathname(), 'fileName' => $file->getFilename(), 'fileSizeBytes' => $file->getSize(), 'format' => strtolower($file->getExtension()), 'recordingStartedAt' => gmdate('c', $file->getMTime())];
+                    if ($file->getSize() <= 44) continue;
+                    $recordings[] = ['filePath' => $file->getPathname(), 'fileName' => $file->getFilename(), 'fileSizeBytes' => $file->getSize(), 'format' => strtolower($file->getExtension()), 'durationSeconds' => $this->recordingDurationSeconds($file->getPathname()), 'recordingStartedAt' => gmdate('c', $file->getMTime())];
                 }
             }
         }
@@ -566,18 +607,21 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             return ['status' => false, 'error' => 'Recording not available.'];
         }
         $size = filesize($path);
+        if ($size !== false && $size <= 44) {
+            return ['status' => false, 'error' => 'Recording file is empty.'];
+        }
         if ($size !== false && $size > 50 * 1024 * 1024) {
             return ['status' => false, 'error' => 'Recording is too large for temporary playback cache.'];
         }
-        $content = file_get_contents($path);
-        if ($content === false) {
-            return ['status' => false, 'error' => 'Recording could not be read.'];
+        $content = $this->recordingMp3Content($path);
+        if (!$content) {
+            return ['status' => false, 'error' => 'Recording could not be converted to MP3.'];
         }
         return [
             'ok' => true,
-            'fileName' => basename($path),
-            'fileSizeBytes' => $size,
-            'contentType' => $this->recordingContentType($path),
+            'fileName' => preg_replace('/\.[^.]+$/', '.mp3', basename($path)),
+            'fileSizeBytes' => strlen($content),
+            'contentType' => 'audio/mpeg',
             'contentBase64' => base64_encode($content),
         ];
     }
@@ -731,7 +775,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 
     private function discoverRecordingPaths()
     {
-        $paths = ['/var/spool/asterisk/monitor', '/var/spool/asterisk/monitorDONE', '/var/lib/asterisk/sounds/recordings'];
+        $paths = ['/var/spool/asterisk/monitor', '/var/spool/asterisk/monitorDONE', '/var/spool/asterisk/voicemail', '/var/lib/asterisk/sounds/recordings'];
         $config = $this->getConnectorConfig();
         if (!empty($config['recordingsPath'])) array_unshift($paths, $config['recordingsPath']);
         $existing = [];
@@ -763,6 +807,45 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             'memory' => 'free -m',
             'uptime' => 'uptime',
         ];
+    }
+
+    private function getAmpPdo()
+    {
+        global $amp_conf;
+        $host = $amp_conf['AMPDBHOST'] ?? 'localhost';
+        $user = $amp_conf['AMPDBUSER'] ?? 'freepbxuser';
+        $password = $amp_conf['AMPDBPASS'] ?? '';
+        $database = !empty($amp_conf['AMPDBNAME']) ? $amp_conf['AMPDBNAME'] : 'asterisk';
+        return new \PDO("mysql:host={$host};dbname={$database};charset=utf8mb4", $user, $password, [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
+    }
+
+    private function queryRows(\PDO $pdo, $table, array $wantedColumns)
+    {
+        if (!$this->tableExists($pdo, $table)) return [];
+        $columns = $this->tableColumns($pdo, $table);
+        $selected = array_values(array_intersect($wantedColumns, $columns));
+        if (empty($selected)) return [];
+        $selectSql = implode(', ', array_map(function ($column) { return '`' . str_replace('`', '', $column) . '`'; }, $selected));
+        $tableSql = '`' . str_replace('`', '', $table) . '`';
+        $stmt = $pdo->query("SELECT {$selectSql} FROM {$tableSql} LIMIT 1000");
+        return $stmt ? $stmt->fetchAll(\PDO::FETCH_ASSOC) : [];
+    }
+
+    private function tableExists(\PDO $pdo, $table)
+    {
+        $stmt = $pdo->prepare('SHOW TABLES LIKE :table');
+        $stmt->execute(['table' => $table]);
+        return (bool) $stmt->fetchColumn();
+    }
+
+    private function tableColumns(\PDO $pdo, $table)
+    {
+        $columns = [];
+        $tableSql = '`' . str_replace('`', '', $table) . '`';
+        foreach ($pdo->query("SHOW COLUMNS FROM {$tableSql}") as $row) {
+            $columns[] = $row['Field'];
+        }
+        return $columns;
     }
 
     private function approvedPath($requested, array $approvedBases)
@@ -823,6 +906,32 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $total = @disk_total_space($path);
         $free = @disk_free_space($path);
         return $total ? (int) round((($total - $free) / $total) * 100) : null;
+    }
+
+    private function recordingDurationSeconds($path)
+    {
+        if (!function_exists('exec')) return null;
+        @exec('ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ' . escapeshellarg($path) . ' 2>/dev/null', $output, $code);
+        if ($code !== 0 || empty($output[0])) return null;
+        $duration = (float) $output[0];
+        return $duration > 0 ? (int) round($duration) : null;
+    }
+
+    private function recordingMp3Content($path)
+    {
+        if (!function_exists('exec')) return null;
+        $tmp = tempnam(sys_get_temp_dir(), 'jtc_mp3_');
+        if (!$tmp) return null;
+        $mp3 = $tmp . '.mp3';
+        @unlink($tmp);
+        @exec('ffmpeg -y -v error -i ' . escapeshellarg($path) . ' -vn -codec:a libmp3lame -b:a 64k ' . escapeshellarg($mp3) . ' 2>&1', $output, $code);
+        if ($code !== 0 || !is_file($mp3) || filesize($mp3) <= 0) {
+            @unlink($mp3);
+            return null;
+        }
+        $content = file_get_contents($mp3);
+        @unlink($mp3);
+        return $content === false ? null : $content;
     }
 
     private function recordingContentType($path)
