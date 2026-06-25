@@ -5,7 +5,7 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '1.0.2';
+    private const MODULE_VERSION = '1.0.3';
     private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
 
     public function install()
@@ -268,7 +268,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             if ($decoded['command'] === 'stream_recording' && $allowStreaming) return $this->streamRecording($payload);
             return ['status' => false, 'error' => 'Unsupported action command.'];
         } catch (\Throwable $exception) {
-            return ['status' => false, 'error' => 'Action failed.'];
+            return ['status' => false, 'error' => $this->sanitizeMessage($exception->getMessage()) ?: 'Action failed.'];
         }
     }
 
@@ -551,7 +551,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         if ($downloadCode !== 0 || !is_file($tmp)) return ['status' => false, 'errorCode' => 'download_failed', 'error' => 'Could not download release.', 'stderr' => $this->sanitizeMessage(implode("\n", $downloadOutput))];
         $actual = hash_file('sha256', $tmp);
         if (!hash_equals($expectedSha256, strtolower($actual))) return ['status' => false, 'errorCode' => 'checksum_mismatch', 'error' => 'Release checksum mismatch.'];
-        @exec('fwconsole ma downloadinstall ' . escapeshellarg($tmp) . ' 2>&1 && fwconsole reload 2>&1', $output, $code);
+        @exec('fwconsole ma downloadinstall ' . escapeshellarg($url) . ' 2>&1 && fwconsole reload 2>&1', $output, $code);
         return ['ok' => $code === 0, 'exitCode' => $code, 'stdout' => $this->sanitizeMessage(implode("\n", $output))];
     }
 
@@ -666,7 +666,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $host = $amp_conf['AMPDBHOST'] ?? 'localhost';
         $user = $amp_conf['AMPDBUSER'] ?? 'freepbxuser';
         $pass = $amp_conf['AMPDBPASS'] ?? '';
-        $database = $amp_conf['CDRDBNAME'] ?? 'asteriskcdrdb';
+        $database = !empty($amp_conf['CDRDBNAME']) ? $amp_conf['CDRDBNAME'] : 'asteriskcdrdb';
         $dsn = 'mysql:host=' . $host . ';dbname=' . $database . ';charset=utf8mb4';
         return new \PDO($dsn, $user, $pass, [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION, \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC]);
     }
