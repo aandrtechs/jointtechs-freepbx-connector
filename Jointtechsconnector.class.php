@@ -5,7 +5,7 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '1.0.0';
+    private const MODULE_VERSION = '1.0.1';
     private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
 
     public function install()
@@ -539,7 +539,10 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
     {
         $url = (string)($input['releaseUrl'] ?? '');
         $expectedSha256 = strtolower((string)($input['expectedSha256'] ?? ''));
-        if (!preg_match('/^https:\/\/github\.com\/aandrtechs\/jointtechs-freepbx-connector\/releases\/download\/v[0-9.]+\/jointtechsconnector-[0-9.]+\.tgz$/', $url)) {
+        if (
+            !preg_match('/^https:\/\/github\.com\/aandrtechs\/jointtechs-freepbx-connector\/releases\/download\/v[0-9.]+\/jointtechsconnector-[0-9.]+\.tgz$/', $url)
+            && !preg_match('/^https:\/\/portal\.joint\.tech\/jointtechsconnector-[0-9.]+\.tgz$/', $url)
+        ) {
             return ['status' => false, 'errorCode' => 'update_url_denied', 'error' => 'Release URL is not approved.'];
         }
         if ($expectedSha256 === '') return ['status' => false, 'errorCode' => 'checksum_required', 'error' => 'Expected SHA256 is required for self-update.'];
