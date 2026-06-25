@@ -5,7 +5,7 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '1.0.1';
+    private const MODULE_VERSION = '1.0.2';
     private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
 
     public function install()

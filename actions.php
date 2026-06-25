@@ -18,4 +18,18 @@ foreach ($_SERVER as $key => $value) {
 }
 
 $body = file_get_contents('php://input');
-FreePBX::Jointtechsconnector()->handleInboundAction($body ?: '', $headers);
+$connector = null;
+try {
+    $connector = FreePBX::Jointtechsconnector();
+} catch (\Throwable $exception) {
+    if (!class_exists('\FreePBX\modules\Jointtechsconnector')) {
+        require_once __DIR__ . '/Jointtechsconnector.class.php';
+    }
+    try {
+        $connector = new \FreePBX\modules\Jointtechsconnector(\FreePBX::Create());
+    } catch (\Throwable $constructorException) {
+        $connector = new \FreePBX\modules\Jointtechsconnector();
+    }
+}
+
+$connector->handleInboundAction($body ?: '', $headers);
