@@ -2,14 +2,15 @@
 <module>
   <rawname>jointtechsconnector</rawname>
   <name>Jointtechs Connector</name>
-  <version>1.0.5</version>
+  <version>1.0.6</version>
   <category>Connectivity</category>
   <publisher>Jointtechs</publisher>
   <license>GPLv3+</license>
   <licenselink>https://www.gnu.org/licenses/gpl-3.0.txt</licenselink>
   <info>https://portal.joint.tech</info>
   <description>Signed Jointtechs PBX agent for read-only discovery, CDR/recording sync, diagnostics, playback, and approved framework updates.</description>
-  <changelog>*1.0.5* Add approved temporary extension call forwarding from the portal.
+  <changelog>*1.0.6* Add SIP/PJSIP endpoint registration status for the live wallboard.
+*1.0.5* Add approved temporary extension call forwarding from the portal.
 *1.0.4* Include extension voicemail, follow-me, and call-forwarding inventory metadata.
 *1.0.3* Fall back to the standard asteriskcdrdb database when FreePBX leaves CDRDBNAME empty, and return sanitized action errors for diagnostics.
 *1.0.2* Let the public action endpoint load the connector class directly when FreePBX BMO lookup is unavailable, and install scheduled outbound call/recording sync.

@@ -5,7 +5,7 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '1.0.5';
+    private const MODULE_VERSION = '1.0.6';
     private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
 
     public function install()
@@ -444,6 +444,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             $voicemailByExtension = $this->discoverVoicemailByExtension($pdo);
             $followMeByExtension = $this->discoverFollowMeByExtension($pdo);
             $callForwardingByExtension = $this->discoverCallForwardingByExtension();
+            $endpointStatusByExtension = $this->discoverEndpointStatusByExtension();
             foreach ($this->queryRows($pdo, 'users', ['extension', 'name', 'outboundcid', 'sipname']) as $row) {
                 $extension = (string)($row['extension'] ?? '');
                 if ($extension === '') continue;
@@ -451,6 +452,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
                 $metadata['voicemail'] = $voicemailByExtension[$extension] ?? ['enabled' => false];
                 $metadata['followMe'] = $followMeByExtension[$extension] ?? ['enabled' => false];
                 $metadata['callForwarding'] = $callForwardingByExtension[$extension] ?? [];
+                $metadata['endpointStatus'] = $endpointStatusByExtension[$extension] ?? ['state' => 'unknown', 'tech' => null];
                 $items[] = ['type' => 'extension', 'objectId' => $extension, 'extension' => $extension, 'number' => $extension, 'name' => $row['name'] ?? $extension, 'metadata' => $metadata];
             }
             foreach ($this->queryRows($pdo, 'ringgroups', ['grpnum', 'description', 'grplist', 'annmsg_id']) as $row) {
@@ -474,6 +476,51 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             return [['type' => 'sync_error', 'objectId' => 'inventory', 'name' => 'Inventory sync failed', 'metadata' => ['error' => $this->sanitizeMessage($exception->getMessage())]]];
         }
         return $items;
+    }
+
+    private function discoverEndpointStatusByExtension()
+    {
+        if (!function_exists('exec')) return [];
+        $items = [];
+        $pjsip = [];
+        @exec('asterisk -rx "pjsip show endpoints" 2>/dev/null', $pjsip, $pjsipCode);
+        if ($pjsipCode === 0) {
+            foreach ($pjsip as $line) {
+                if (!preg_match('/^\s*Endpoint:\s+([0-9*#]+)(?:\/[^\s]+)?\s+(.+)$/i', (string)$line, $matches)) continue;
+                $extension = trim($matches[1]);
+                $statusText = strtolower(trim($matches[2]));
+                $items[$extension] = [
+                    'state' => $this->endpointStateFromText($statusText),
+                    'tech' => 'pjsip',
+                    'raw' => trim((string)$line),
+                ];
+            }
+        }
+
+        $sip = [];
+        @exec('asterisk -rx "sip show peers" 2>/dev/null', $sip, $sipCode);
+        if ($sipCode === 0) {
+            foreach ($sip as $line) {
+                if (!preg_match('/^\s*([0-9*#]+)\/[^\s]+\s+.+\s+(OK|UNKNOWN|UNREACHABLE|UNMONITORED|LAGGED|REACHABLE|UNREGISTERED|Rejected)(?:\s|\(|$)/i', (string)$line, $matches)) continue;
+                $extension = trim($matches[1]);
+                if (isset($items[$extension]) && $items[$extension]['state'] !== 'unknown') continue;
+                $items[$extension] = [
+                    'state' => $this->endpointStateFromText(strtolower($matches[2])),
+                    'tech' => 'sip',
+                    'raw' => trim((string)$line),
+                ];
+            }
+        }
+
+        return $items;
+    }
+
+    private function endpointStateFromText($text)
+    {
+        $text = strtolower((string)$text);
+        if (preg_match('/\b(not in use|available|reachable|ok|idle|in use|busy|ringing|on hold)\b/', $text)) return 'online';
+        if (preg_match('/\b(unavailable|unreachable|unregistered|rejected|unknown|lagged)\b/', $text)) return 'offline';
+        return 'unknown';
     }
 
     private function discoverVoicemailByExtension(\PDO $pdo)
