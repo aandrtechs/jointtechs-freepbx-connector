@@ -5,7 +5,7 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '1.0.3';
+    private const MODULE_VERSION = '1.0.4';
     private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
 
     public function install()
@@ -392,10 +392,17 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $items = [];
         try {
             $pdo = $this->getAmpPdo();
+            $voicemailByExtension = $this->discoverVoicemailByExtension($pdo);
+            $followMeByExtension = $this->discoverFollowMeByExtension($pdo);
+            $callForwardingByExtension = $this->discoverCallForwardingByExtension();
             foreach ($this->queryRows($pdo, 'users', ['extension', 'name', 'outboundcid', 'sipname']) as $row) {
                 $extension = (string)($row['extension'] ?? '');
                 if ($extension === '') continue;
-                $items[] = ['type' => 'extension', 'objectId' => $extension, 'extension' => $extension, 'number' => $extension, 'name' => $row['name'] ?? $extension, 'metadata' => $row];
+                $metadata = $row;
+                $metadata['voicemail'] = $voicemailByExtension[$extension] ?? ['enabled' => false];
+                $metadata['followMe'] = $followMeByExtension[$extension] ?? ['enabled' => false];
+                $metadata['callForwarding'] = $callForwardingByExtension[$extension] ?? [];
+                $items[] = ['type' => 'extension', 'objectId' => $extension, 'extension' => $extension, 'number' => $extension, 'name' => $row['name'] ?? $extension, 'metadata' => $metadata];
             }
             foreach ($this->queryRows($pdo, 'ringgroups', ['grpnum', 'description', 'grplist', 'annmsg_id']) as $row) {
                 $number = (string)($row['grpnum'] ?? '');
@@ -410,10 +417,58 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             foreach ($this->queryRows($pdo, 'voicemail_users', ['extension', 'name', 'email', 'pager']) as $row) {
                 $extension = (string)($row['extension'] ?? '');
                 if ($extension === '') continue;
-                $items[] = ['type' => 'voicemail', 'objectId' => $extension, 'extension' => $extension, 'number' => $extension, 'name' => $row['name'] ?? ('Voicemail ' . $extension), 'metadata' => $row];
+                $metadata = $row;
+                $metadata['voicemail'] = array_merge(['enabled' => true], $row);
+                $items[] = ['type' => 'voicemail', 'objectId' => $extension, 'extension' => $extension, 'number' => $extension, 'name' => $row['name'] ?? ('Voicemail ' . $extension), 'metadata' => $metadata];
             }
         } catch (\Throwable $exception) {
             return [['type' => 'sync_error', 'objectId' => 'inventory', 'name' => 'Inventory sync failed', 'metadata' => ['error' => $this->sanitizeMessage($exception->getMessage())]]];
+        }
+        return $items;
+    }
+
+    private function discoverVoicemailByExtension(\PDO $pdo)
+    {
+        $items = [];
+        foreach ($this->queryRows($pdo, 'voicemail_users', ['extension', 'name', 'email', 'pager', 'options', 'saycid', 'envelope']) as $row) {
+            $extension = (string)($row['extension'] ?? '');
+            if ($extension === '') continue;
+            $row['enabled'] = true;
+            $items[$extension] = $row;
+        }
+        return $items;
+    }
+
+    private function discoverFollowMeByExtension(\PDO $pdo)
+    {
+        $items = [];
+        foreach ($this->queryRows($pdo, 'findmefollow', ['grpnum', 'grplist', 'strategy', 'grptime', 'pre_ring', 'postdest', 'dring', 'needsconf', 'remotealert_id', 'toolate_id', 'ringing']) as $row) {
+            $extension = (string)($row['grpnum'] ?? '');
+            if ($extension === '') continue;
+            $row['enabled'] = true;
+            $items[$extension] = $row;
+        }
+        return $items;
+    }
+
+    private function discoverCallForwardingByExtension()
+    {
+        if (!function_exists('exec')) return [];
+        $output = [];
+        @exec('asterisk -rx "database show CF" 2>/dev/null', $output, $code);
+        if ($code !== 0 || empty($output)) return [];
+        $items = [];
+        foreach ($output as $line) {
+            if (!preg_match('#/([^/]+)/([^/\s]+)\s*:\s*(.+)$#', (string)$line, $matches)) continue;
+            $family = strtoupper(trim($matches[1]));
+            $extension = trim($matches[2]);
+            $destination = trim($matches[3]);
+            if ($extension === '' || $destination === '') continue;
+            if (!isset($items[$extension])) $items[$extension] = [];
+            if ($family === 'CF') $items[$extension]['unconditional'] = $destination;
+            elseif ($family === 'CFB') $items[$extension]['busy'] = $destination;
+            elseif ($family === 'CFU' || $family === 'CFNA') $items[$extension]['unavailable'] = $destination;
+            else $items[$extension][$family] = $destination;
         }
         return $items;
     }
