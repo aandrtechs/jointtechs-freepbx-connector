@@ -5,7 +5,7 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '1.0.4';
+    private const MODULE_VERSION = '1.0.5';
     private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
 
     public function install()
@@ -341,7 +341,10 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         if (!in_array($permission, ['read', 'approved_fix', 'self_update'], true)) {
             return ['status' => false, 'errorCode' => 'permission_invalid', 'error' => 'Invalid task permission.'];
         }
-        if ($permission !== 'read' && $command !== 'self_update') {
+        if ($command === 'set_temp_call_forward' && $permission !== 'approved_fix') {
+            return ['status' => false, 'errorCode' => 'permission_denied', 'error' => 'Temporary call forwarding requires approved fix permission.'];
+        }
+        if ($permission !== 'read' && $command !== 'self_update' && $command !== 'set_temp_call_forward') {
             return ['status' => false, 'errorCode' => 'write_denied', 'error' => 'Only allowlisted approved fixes are supported.'];
         }
         if ($command === 'discover_system') return ['ok' => true, 'discovery' => $this->discoverSystem()];
@@ -352,8 +355,54 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         if ($command === 'list_path') return $this->listApprovedPath($input);
         if ($command === 'fetch_file') return $this->fetchApprovedFile($input);
         if ($command === 'command_probe') return $this->runCommandProbe($input);
+        if ($command === 'set_temp_call_forward') return $this->setTempCallForward($input);
         if ($command === 'self_update') return $this->selfUpdate($input);
         return ['status' => false, 'errorCode' => 'task_unknown', 'error' => 'Unsupported agent task.'];
+    }
+
+    private function setTempCallForward(array $input)
+    {
+        if (!function_exists('exec')) {
+            return ['status' => false, 'errorCode' => 'exec_unavailable', 'error' => 'Asterisk command execution is not available.'];
+        }
+
+        $extension = preg_replace('/[^0-9*#]/', '', (string)($input['extension'] ?? ''));
+        $destination = preg_replace('/[^0-9+*#]/', '', (string)($input['destination'] ?? ''));
+        $ttlSeconds = (int)($input['ttlSeconds'] ?? 3600);
+        $ttlSeconds = max(60, min(86400, $ttlSeconds));
+
+        if (strlen($extension) < 2 || strlen($extension) > 24) {
+            return ['status' => false, 'errorCode' => 'extension_invalid', 'error' => 'Extension is not valid.'];
+        }
+        if (strlen($destination) < 2 || strlen($destination) > 24 || (strpos($destination, '+') !== false && strpos($destination, '+') !== 0)) {
+            return ['status' => false, 'errorCode' => 'destination_invalid', 'error' => 'Forward destination is not valid.'];
+        }
+
+        $putCommand = 'asterisk -rx ' . escapeshellarg('database put CF ' . $extension . ' ' . $destination);
+        @exec($putCommand . ' 2>&1', $output, $code);
+        if ($code !== 0) {
+            return ['status' => false, 'errorCode' => 'asterisk_failed', 'error' => 'Could not set call forwarding.', 'stdout' => implode("\n", $output)];
+        }
+
+        $clearCommand = sprintf(
+            'sh -c %s',
+            escapeshellarg(
+                'sleep ' . $ttlSeconds .
+                '; current=$(asterisk -rx ' . escapeshellarg('database get CF ' . $extension) . ' 2>/dev/null || true)' .
+                '; echo "$current" | grep -F ' . escapeshellarg($destination) . ' >/dev/null 2>&1 && asterisk -rx ' . escapeshellarg('database del CF ' . $extension) . ' >/dev/null 2>&1'
+            )
+        );
+        @exec($clearCommand . ' >/dev/null 2>&1 &');
+
+        $expiresAt = gmdate('c', time() + $ttlSeconds);
+        return [
+            'ok' => true,
+            'message' => 'Temporary call forwarding set for extension ' . $extension . '.',
+            'extension' => $extension,
+            'destination' => $destination,
+            'ttlSeconds' => $ttlSeconds,
+            'expiresAt' => $expiresAt,
+        ];
     }
 
     private function discoverSystem()
@@ -376,7 +425,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             'recordingPaths' => $this->discoverRecordingPaths(),
             'logPaths' => $this->approvedLogPaths(),
             'commandProbes' => array_keys($this->approvedCommandProbes()),
-            'capabilities' => ['read_db_schema', 'read_cdr', 'scan_recordings', 'sync_inventory', 'tail_logs', 'fetch_approved_files', 'self_update'],
+            'capabilities' => ['read_db_schema', 'read_cdr', 'scan_recordings', 'sync_inventory', 'tail_logs', 'fetch_approved_files', 'temporary_call_forward', 'self_update'],
         ];
     }
 
