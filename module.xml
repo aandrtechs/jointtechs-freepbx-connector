@@ -2,14 +2,15 @@
 <module>
   <rawname>jointtechsconnector</rawname>
   <name>Jointtechs Connector</name>
-  <version>1.0.7</version>
+  <version>1.0.8</version>
   <category>Connectivity</category>
   <publisher>Jointtechs</publisher>
   <license>GPLv3+</license>
   <licenselink>https://www.gnu.org/licenses/gpl-3.0.txt</licenselink>
   <info>https://portal.joint.tech</info>
   <description>Jointtechs PBX agent for read-only discovery, CDR/recording sync, live channel status, diagnostics, playback, and approved framework updates.</description>
-  <changelog>*1.0.7* Add an approved read-only Asterisk active-channel probe for the live wallboard.
+  <changelog>*1.0.8* Reinstall the automatic sync cron from heartbeat/config flows so calls keep syncing without manual resync.
+*1.0.7* Add an approved read-only Asterisk active-channel probe for the live wallboard.
 *1.0.6* Add SIP/PJSIP endpoint registration status for the live wallboard.
 *1.0.5* Add approved temporary extension call forwarding from the portal.
 *1.0.4* Include extension voicemail, follow-me, and call-forwarding inventory metadata.

@@ -5,13 +5,14 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '1.0.7';
+    private const MODULE_VERSION = '1.0.8';
     private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
 
     public function install()
     {
         try {
             $this->autoRegisterWithPortal();
+            $this->ensureSyncCron();
         } catch (\Throwable $exception) {
             // Installation should not fail if outbound HTTPS is temporarily unavailable.
         }
@@ -43,6 +44,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
     {
         try {
             $this->autoRegisterWithPortal();
+            $this->ensureSyncCron();
         } catch (\Throwable $exception) {
             // The config page can still render if registration is not available yet.
         }
@@ -84,6 +86,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
     public function runHeartbeatCli()
     {
         $this->autoRegisterWithPortal();
+        $this->ensureSyncCron();
         return $this->sendHeartbeat();
     }
 
@@ -219,7 +222,24 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $config['registeredAt'] = gmdate('c');
         $config['moduleVersion'] = self::MODULE_VERSION;
         $this->setConnectorConfig($config);
+        $this->ensureSyncCron();
         return $config;
+    }
+
+    private function ensureSyncCron()
+    {
+        $moduleDir = __DIR__;
+        $calls = $moduleDir . '/bin/sync-calls.php';
+        $recordings = $moduleDir . '/bin/sync-recordings.php';
+        $heartbeat = $moduleDir . '/bin/heartbeat.php';
+        @chmod($calls, 0755);
+        @chmod($recordings, 0755);
+        @chmod($heartbeat, 0755);
+        $cron = "*/5 * * * * asterisk php {$calls} >/dev/null 2>&1\n"
+            . "*/15 * * * * asterisk php {$recordings} >/dev/null 2>&1\n"
+            . "17 * * * * asterisk php {$heartbeat} >/dev/null 2>&1\n";
+        @file_put_contents('/etc/cron.d/jointtechsconnector', $cron);
+        @chmod('/etc/cron.d/jointtechsconnector', 0644);
     }
 
     private function systemPayload($connectorUrl, $recordingsPath)
