@@ -445,7 +445,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             'recordingPaths' => $this->discoverRecordingPaths(),
             'logPaths' => $this->approvedLogPaths(),
             'commandProbes' => array_keys($this->approvedCommandProbes()),
-            'capabilities' => ['read_db_schema', 'read_cdr', 'scan_recordings', 'sync_inventory', 'read_active_channels', 'tail_logs', 'fetch_approved_files', 'temporary_call_forward', 'self_update'],
+            'capabilities' => ['read_db_schema', 'read_cdr', 'scan_recordings', 'sync_inventory', 'read_active_channels', 'read_queue_status', 'tail_logs', 'fetch_approved_files', 'temporary_call_forward', 'self_update'],
         ];
     }
 
@@ -978,6 +978,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             'fwconsole_ma_list' => 'fwconsole ma list',
             'asterisk_version' => 'asterisk -rx "core show version"',
             'active_channels' => 'asterisk -rx "core show channels concise"',
+            'queue_status' => 'asterisk -rx "queue show all"',
             'disk_usage' => 'df -h',
             'memory' => 'free -m',
             'uptime' => 'uptime',
