@@ -5,7 +5,7 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '1.0.6';
+    private const MODULE_VERSION = '1.0.7';
     private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
 
     public function install()
@@ -425,7 +425,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             'recordingPaths' => $this->discoverRecordingPaths(),
             'logPaths' => $this->approvedLogPaths(),
             'commandProbes' => array_keys($this->approvedCommandProbes()),
-            'capabilities' => ['read_db_schema', 'read_cdr', 'scan_recordings', 'sync_inventory', 'tail_logs', 'fetch_approved_files', 'temporary_call_forward', 'self_update'],
+            'capabilities' => ['read_db_schema', 'read_cdr', 'scan_recordings', 'sync_inventory', 'read_active_channels', 'tail_logs', 'fetch_approved_files', 'temporary_call_forward', 'self_update'],
         ];
     }
 
@@ -957,6 +957,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             'fwconsole_version' => 'fwconsole --version',
             'fwconsole_ma_list' => 'fwconsole ma list',
             'asterisk_version' => 'asterisk -rx "core show version"',
+            'active_channels' => 'asterisk -rx "core show channels concise"',
             'disk_usage' => 'df -h',
             'memory' => 'free -m',
             'uptime' => 'uptime',
