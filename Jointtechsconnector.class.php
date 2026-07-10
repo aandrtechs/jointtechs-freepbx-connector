@@ -5,8 +5,9 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '1.0.8';
+    private const MODULE_VERSION = '1.0.21';
     private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
+    private const FORWARD_MARKER_FAMILY = 'JOINTTECHS_CF_EXPIRY';
 
     public function install()
     {
@@ -87,13 +88,20 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
     {
         $this->autoRegisterWithPortal();
         $this->ensureSyncCron();
+        $this->reconcileTemporaryCallForwards();
         return $this->sendHeartbeat();
     }
 
     public function runCallSyncCli()
     {
         $this->autoRegisterWithPortal();
+        $this->reconcileTemporaryCallForwards();
         return $this->syncCalls();
+    }
+
+    public function runTemporaryForwardExpiryCli($extension, $generation)
+    {
+        return $this->expireTemporaryCallForward($extension, $generation);
     }
 
     public function runRecordingSyncCli()
@@ -232,9 +240,11 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $calls = $moduleDir . '/bin/sync-calls.php';
         $recordings = $moduleDir . '/bin/sync-recordings.php';
         $heartbeat = $moduleDir . '/bin/heartbeat.php';
+        $forwardExpiry = $moduleDir . '/bin/expire-forward.php';
         @chmod($calls, 0755);
         @chmod($recordings, 0755);
         @chmod($heartbeat, 0755);
+        @chmod($forwardExpiry, 0755);
         $cron = "*/5 * * * * asterisk php {$calls} >/dev/null 2>&1\n"
             . "*/15 * * * * asterisk php {$recordings} >/dev/null 2>&1\n"
             . "17 * * * * asterisk php {$heartbeat} >/dev/null 2>&1\n";
@@ -294,7 +304,9 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 
     private function actionSuccess(array $payload)
     {
-        $payload['status'] = true;
+        if (!array_key_exists('status', $payload)) {
+            $payload['status'] = true;
+        }
         return $payload;
     }
 
@@ -361,10 +373,10 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         if (!in_array($permission, ['read', 'approved_fix', 'self_update'], true)) {
             return ['status' => false, 'errorCode' => 'permission_invalid', 'error' => 'Invalid task permission.'];
         }
-        if ($command === 'set_temp_call_forward' && $permission !== 'approved_fix') {
-            return ['status' => false, 'errorCode' => 'permission_denied', 'error' => 'Temporary call forwarding requires approved fix permission.'];
+        if (in_array($command, ['set_temp_call_forward', 'clear_temp_call_forward', 'supervise_call'], true) && $permission !== 'approved_fix') {
+            return ['status' => false, 'errorCode' => 'permission_denied', 'error' => 'This task requires approved fix permission.'];
         }
-        if ($permission !== 'read' && $command !== 'self_update' && $command !== 'set_temp_call_forward') {
+        if ($permission !== 'read' && $command !== 'self_update' && $command !== 'set_temp_call_forward' && $command !== 'clear_temp_call_forward' && $command !== 'supervise_call') {
             return ['status' => false, 'errorCode' => 'write_denied', 'error' => 'Only allowlisted approved fixes are supported.'];
         }
         if ($command === 'discover_system') return ['ok' => true, 'discovery' => $this->discoverSystem()];
@@ -376,6 +388,8 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         if ($command === 'fetch_file') return $this->fetchApprovedFile($input);
         if ($command === 'command_probe') return $this->runCommandProbe($input);
         if ($command === 'set_temp_call_forward') return $this->setTempCallForward($input);
+        if ($command === 'clear_temp_call_forward') return $this->clearTempCallForward($input);
+        if ($command === 'supervise_call') return $this->superviseCall($input);
         if ($command === 'self_update') return $this->selfUpdate($input);
         return ['status' => false, 'errorCode' => 'task_unknown', 'error' => 'Unsupported agent task.'];
     }
@@ -388,8 +402,9 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 
         $extension = preg_replace('/[^0-9*#]/', '', (string)($input['extension'] ?? ''));
         $destination = preg_replace('/[^0-9+*#]/', '', (string)($input['destination'] ?? ''));
+        $untilRemoved = filter_var($input['untilRemoved'] ?? ($input['permanent'] ?? false), FILTER_VALIDATE_BOOLEAN);
         $ttlSeconds = (int)($input['ttlSeconds'] ?? 3600);
-        $ttlSeconds = max(60, min(86400, $ttlSeconds));
+        $ttlSeconds = $untilRemoved ? 0 : max(60, min(31536000, $ttlSeconds));
 
         if (strlen($extension) < 2 || strlen($extension) > 24) {
             return ['status' => false, 'errorCode' => 'extension_invalid', 'error' => 'Extension is not valid.'];
@@ -398,31 +413,418 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             return ['status' => false, 'errorCode' => 'destination_invalid', 'error' => 'Forward destination is not valid.'];
         }
 
-        $putCommand = 'asterisk -rx ' . escapeshellarg('database put CF ' . $extension . ' ' . $destination);
-        @exec($putCommand . ' 2>&1', $output, $code);
-        if ($code !== 0) {
-            return ['status' => false, 'errorCode' => 'asterisk_failed', 'error' => 'Could not set call forwarding.', 'stdout' => implode("\n", $output)];
+        $lock = $this->acquireTemporaryForwardLock($extension);
+        if (!$lock) {
+            return ['status' => false, 'errorCode' => 'forward_lock_failed', 'error' => 'Could not lock call forwarding for this extension.'];
         }
 
-        $clearCommand = sprintf(
-            'sh -c %s',
-            escapeshellarg(
-                'sleep ' . $ttlSeconds .
-                '; current=$(asterisk -rx ' . escapeshellarg('database get CF ' . $extension) . ' 2>/dev/null || true)' .
-                '; echo "$current" | grep -F ' . escapeshellarg($destination) . ' >/dev/null 2>&1 && asterisk -rx ' . escapeshellarg('database del CF ' . $extension) . ' >/dev/null 2>&1'
-            )
-        );
-        @exec($clearCommand . ' >/dev/null 2>&1 &');
+        try {
+            $generation = $this->newTemporaryForwardGeneration();
+            $expiresAtEpoch = $untilRemoved ? 0 : time() + $ttlSeconds;
+            $markerState = $untilRemoved ? 'permanent' : 'timed';
+            $putCommand = 'asterisk -rx ' . escapeshellarg('database put CF ' . $extension . ' ' . $destination);
+            $output = [];
+            @exec($putCommand . ' 2>&1', $output, $code);
+            if ($code !== 0) {
+                return ['status' => false, 'errorCode' => 'asterisk_failed', 'error' => 'Could not set call forwarding.', 'stdout' => implode("\n", $output)];
+            }
 
-        $expiresAt = gmdate('c', time() + $ttlSeconds);
+            if (!$this->writeTemporaryForwardMarker($extension, $generation, $expiresAtEpoch, $destination, $markerState)) {
+                $rolledBack = $this->deleteAsteriskDatabaseValue('CF', $extension);
+                return [
+                    'status' => false,
+                    'errorCode' => 'forward_marker_failed',
+                    'error' => $rolledBack
+                        ? 'Could not persist the call forwarding expiry marker.'
+                        : 'Could not persist the call forwarding expiry marker or roll back call forwarding.',
+                ];
+            }
+
+            $expiresAt = null;
+            if (!$untilRemoved) {
+                $expiryScript = __DIR__ . '/bin/expire-forward.php';
+                $expiryCommand = 'sleep ' . (int)$ttlSeconds
+                    . '; php ' . escapeshellarg($expiryScript)
+                    . ' ' . escapeshellarg($extension)
+                    . ' ' . escapeshellarg($generation);
+                @exec('sh -c ' . escapeshellarg($expiryCommand) . ' >/dev/null 2>&1 &');
+                $expiresAt = gmdate('c', $expiresAtEpoch);
+            }
+
+            return [
+                'ok' => true,
+                'message' => ($untilRemoved ? 'Call forwarding' : 'Temporary call forwarding') . ' set for extension ' . $extension . '.',
+                'extension' => $extension,
+                'destination' => $destination,
+                'ttlSeconds' => $ttlSeconds,
+                'expiresAt' => $expiresAt,
+                'untilRemoved' => $untilRemoved,
+                'permanent' => $untilRemoved,
+            ];
+        } finally {
+            $this->releaseTemporaryForwardLock($lock);
+        }
+    }
+
+    private function clearTempCallForward(array $input)
+    {
+        if (!function_exists('exec')) {
+            return ['status' => false, 'errorCode' => 'exec_unavailable', 'error' => 'Asterisk command execution is not available.'];
+        }
+
+        $extension = preg_replace('/[^0-9*#]/', '', (string)($input['extension'] ?? ''));
+        if (strlen($extension) < 2 || strlen($extension) > 24) {
+            return ['status' => false, 'errorCode' => 'extension_invalid', 'error' => 'Extension is not valid.'];
+        }
+
+        $lock = $this->acquireTemporaryForwardLock($extension);
+        if (!$lock) {
+            return ['status' => false, 'errorCode' => 'forward_lock_failed', 'error' => 'Could not lock call forwarding for this extension.'];
+        }
+
+        try {
+            $generation = $this->newTemporaryForwardGeneration();
+            if (!$this->writeTemporaryForwardMarker($extension, $generation, 0, '', 'cleared')) {
+                return ['status' => false, 'errorCode' => 'forward_marker_failed', 'error' => 'Could not invalidate the call forwarding expiry marker.'];
+            }
+
+            $command = 'asterisk -rx ' . escapeshellarg('database del CF ' . $extension);
+            $output = [];
+            @exec($command . ' 2>&1', $output, $code);
+            $stdout = implode("\n", $output);
+            $notFound = stripos($stdout, 'Database entry not found') !== false || stripos($stdout, 'not found') !== false;
+            if ($code !== 0 && !$notFound) {
+                return ['status' => false, 'errorCode' => 'asterisk_failed', 'error' => 'Could not remove call forwarding.', 'stdout' => $stdout];
+            }
+
+            return [
+                'ok' => true,
+                'message' => 'Call forwarding removed for extension ' . $extension . '.',
+                'extension' => $extension,
+                'cleared' => true,
+            ];
+        } finally {
+            $this->releaseTemporaryForwardLock($lock);
+        }
+    }
+
+    private function reconcileTemporaryCallForwards()
+    {
+        if (!function_exists('exec')) return ['checked' => 0, 'expired' => 0];
+        $markers = $this->listTemporaryForwardMarkers();
+        $expired = 0;
+        foreach ($markers as $extension => $marker) {
+            if (($marker['state'] ?? '') !== 'timed' || (int)($marker['expiresAt'] ?? 0) <= 0 || (int)$marker['expiresAt'] > time()) {
+                continue;
+            }
+            $result = $this->expireTemporaryCallForward($extension, (string)($marker['generation'] ?? ''));
+            if (!empty($result['expired'])) $expired++;
+        }
+        return ['checked' => count($markers), 'expired' => $expired];
+    }
+
+    private function expireTemporaryCallForward($extension, $generation)
+    {
+        if (!function_exists('exec')) return ['ok' => false, 'expired' => false, 'reason' => 'exec_unavailable'];
+        $extension = preg_replace('/[^0-9*#]/', '', (string)$extension);
+        $generation = strtolower(trim((string)$generation));
+        if (strlen($extension) < 2 || strlen($extension) > 24 || !preg_match('/^[a-f0-9]{64}$/', $generation)) {
+            return ['ok' => false, 'expired' => false, 'reason' => 'invalid_marker'];
+        }
+
+        $lock = $this->acquireTemporaryForwardLock($extension);
+        if (!$lock) return ['ok' => false, 'expired' => false, 'reason' => 'lock_failed'];
+
+        try {
+            $marker = $this->readTemporaryForwardMarker($extension);
+            if (!$marker || !hash_equals((string)$marker['generation'], $generation)) {
+                return ['ok' => true, 'expired' => false, 'reason' => 'stale_generation'];
+            }
+            if (($marker['state'] ?? '') !== 'timed' || (int)$marker['expiresAt'] <= 0) {
+                return ['ok' => true, 'expired' => false, 'reason' => 'not_timed'];
+            }
+            if ((int)$marker['expiresAt'] > time()) {
+                return ['ok' => true, 'expired' => false, 'reason' => 'not_due'];
+            }
+
+            $currentDestination = $this->readAsteriskDatabaseValue('CF', $extension);
+            if ($currentDestination !== null && $currentDestination === (string)$marker['destination']) {
+                if (!$this->deleteAsteriskDatabaseValue('CF', $extension)) {
+                    return ['ok' => false, 'expired' => false, 'reason' => 'forward_clear_failed'];
+                }
+            }
+
+            $completedGeneration = $this->newTemporaryForwardGeneration();
+            if (!$this->writeTemporaryForwardMarker($extension, $completedGeneration, 0, '', 'expired')) {
+                return ['ok' => false, 'expired' => false, 'reason' => 'marker_finalize_failed'];
+            }
+
+            return ['ok' => true, 'expired' => true, 'extension' => $extension];
+        } finally {
+            $this->releaseTemporaryForwardLock($lock);
+        }
+    }
+
+    private function newTemporaryForwardGeneration()
+    {
+        try {
+            return hash('sha256', random_bytes(32));
+        } catch (\Throwable $exception) {
+            return hash('sha256', uniqid((string)mt_rand(), true));
+        }
+    }
+
+    private function writeTemporaryForwardMarker($extension, $generation, $expiresAt, $destination, $state)
+    {
+        $value = strtolower((string)$generation)
+            . '|' . (int)$expiresAt
+            . '|' . rawurlencode((string)$destination)
+            . '|' . strtolower((string)$state);
+        $command = 'asterisk -rx ' . escapeshellarg('database put ' . self::FORWARD_MARKER_FAMILY . ' ' . $extension . ' ' . $value);
+        $output = [];
+        @exec($command . ' 2>&1', $output, $code);
+        return $code === 0;
+    }
+
+    private function readTemporaryForwardMarker($extension)
+    {
+        $value = $this->readAsteriskDatabaseValue(self::FORWARD_MARKER_FAMILY, $extension);
+        return $value === null ? null : $this->parseTemporaryForwardMarker($value);
+    }
+
+    private function listTemporaryForwardMarkers()
+    {
+        $command = 'asterisk -rx ' . escapeshellarg('database show ' . self::FORWARD_MARKER_FAMILY);
+        $output = [];
+        @exec($command . ' 2>&1', $output, $code);
+        if ($code !== 0) return [];
+
+        $markers = [];
+        $prefix = '/' . self::FORWARD_MARKER_FAMILY . '/';
+        foreach ($output as $line) {
+            $line = trim((string)$line);
+            if (strpos($line, $prefix) !== 0 || strpos($line, ':') === false) continue;
+            list($key, $value) = array_map('trim', explode(':', $line, 2));
+            $extension = substr($key, strlen($prefix));
+            if ($extension === '' || preg_match('/[^0-9*#]/', $extension)) continue;
+            $marker = $this->parseTemporaryForwardMarker($value);
+            if ($marker) $markers[$extension] = $marker;
+        }
+        return $markers;
+    }
+
+    private function parseTemporaryForwardMarker($value)
+    {
+        $parts = explode('|', trim((string)$value), 4);
+        if (count($parts) !== 4 || !preg_match('/^[a-f0-9]{64}$/', $parts[0]) || !preg_match('/^[0-9]+$/', $parts[1])) return null;
+        $state = strtolower($parts[3]);
+        if (!in_array($state, ['timed', 'permanent', 'cleared', 'expired'], true)) return null;
         return [
-            'ok' => true,
-            'message' => 'Temporary call forwarding set for extension ' . $extension . '.',
-            'extension' => $extension,
-            'destination' => $destination,
-            'ttlSeconds' => $ttlSeconds,
-            'expiresAt' => $expiresAt,
+            'generation' => $parts[0],
+            'expiresAt' => (int)$parts[1],
+            'destination' => rawurldecode($parts[2]),
+            'state' => $state,
         ];
+    }
+
+    private function readAsteriskDatabaseValue($family, $key)
+    {
+        $command = 'asterisk -rx ' . escapeshellarg('database get ' . $family . ' ' . $key);
+        $output = [];
+        @exec($command . ' 2>&1', $output, $code);
+        if ($code !== 0) return null;
+        foreach ($output as $line) {
+            if (preg_match('/^\s*Value:\s*(.*?)\s*$/i', (string)$line, $matches)) {
+                return (string)$matches[1];
+            }
+        }
+        return null;
+    }
+
+    private function deleteAsteriskDatabaseValue($family, $key)
+    {
+        $command = 'asterisk -rx ' . escapeshellarg('database del ' . $family . ' ' . $key);
+        $output = [];
+        @exec($command . ' 2>&1', $output, $code);
+        $stdout = implode("\n", $output);
+        $notFound = stripos($stdout, 'Database entry not found') !== false || stripos($stdout, 'not found') !== false;
+        return $code === 0 || $notFound;
+    }
+
+    private function acquireTemporaryForwardLock($extension)
+    {
+        $path = rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR)
+            . DIRECTORY_SEPARATOR
+            . 'jointtechsconnector-forward-' . hash('sha256', (string)$extension) . '.lock';
+        $handle = @fopen($path, 'c');
+        if (!$handle) return null;
+        if (!@flock($handle, LOCK_EX)) {
+            @fclose($handle);
+            return null;
+        }
+        return $handle;
+    }
+
+    private function releaseTemporaryForwardLock($handle)
+    {
+        if (!is_resource($handle)) return;
+        @flock($handle, LOCK_UN);
+        @fclose($handle);
+    }
+
+    private function superviseCall(array $input)
+    {
+        if (!function_exists('exec')) {
+            return ['status' => false, 'errorCode' => 'exec_unavailable', 'error' => 'Asterisk command execution is not available.'];
+        }
+
+        $mode = strtolower((string)($input['mode'] ?? 'listen'));
+        if (!in_array($mode, ['listen', 'whisper', 'barge'], true)) {
+            return ['status' => false, 'errorCode' => 'mode_invalid', 'error' => 'Supervision mode is not supported.'];
+        }
+
+        $supervisor = preg_replace('/[^0-9*#]/', '', (string)($input['supervisorExtension'] ?? ''));
+        $target = preg_replace('/[^0-9*#]/', '', (string)($input['targetExtension'] ?? ''));
+        if (!$supervisor || !$target) {
+            return ['status' => false, 'errorCode' => 'extension_invalid', 'error' => 'Supervisor or target extension is invalid.'];
+        }
+
+        $options = ['listen' => 'qsE', 'whisper' => 'qwsE', 'barge' => 'qBsE'][$mode];
+        $exactTarget = $this->findActiveSpyTarget($target);
+        $spyBase = $exactTarget && !empty($exactTarget['channel']) ? $this->channelSpyBase($exactTarget['channel']) : null;
+        $attempts = $this->supervisionAttempts($supervisor, $target, $spyBase, $options);
+        $stdout = '';
+        $code = 1;
+        $spyChannel = 'Local/' . $supervisor . '@from-internal/n';
+        $spyTarget = $target . '@from-internal';
+        $spyOptions = $options;
+
+        foreach ($attempts as $attempt) {
+            $spyChannel = $attempt['channel'];
+            $spyTarget = $attempt['target'];
+            $spyOptions = $attempt['options'];
+            $originate = 'channel originate ' . $spyChannel . ' application ChanSpy ' . $spyTarget . ',' . $spyOptions;
+            $command = 'asterisk -rx ' . escapeshellarg($originate);
+            $output = [];
+            @exec($command . ' 2>&1', $output, $code);
+            $stdout = implode("\n", $output);
+            if ($code === 0 && stripos($stdout, 'no such application') === false && stripos($stdout, 'not found') === false && stripos($stdout, 'no such channel') === false) {
+                break;
+            }
+        }
+
+        return [
+            'status' => $code === 0,
+            'message' => $code === 0 ? ucfirst($mode) . ' action sent.' : ucfirst($mode) . ' action failed.',
+            'stdout' => $stdout,
+            'error' => $code === 0 ? null : $stdout,
+            'mode' => $mode,
+            'supervisorExtension' => $supervisor,
+            'targetExtension' => $target,
+            'spyApplication' => 'ChanSpy',
+            'spyChannel' => $spyChannel,
+            'spyTarget' => $spyTarget,
+            'exactTargetFound' => (bool) $exactTarget,
+        ];
+    }
+
+    private function supervisionAttempts($supervisor, $target, $spyBase, $options)
+    {
+        $attempts = [];
+        $targets = array_values(array_filter([$spyBase, 'PJSIP/' . $target, 'SIP/' . $target]));
+        $supervisorChannels = ['Local/' . $supervisor . '@from-internal/n', 'PJSIP/' . $supervisor, 'SIP/' . $supervisor];
+        foreach ($supervisorChannels as $channel) {
+            foreach ($targets as $targetChannel) {
+                $attempts[] = ['channel' => $channel, 'target' => $targetChannel, 'options' => $options];
+            }
+        }
+
+        $seen = [];
+        return array_values(array_filter($attempts, function ($attempt) use (&$seen) {
+            $key = $attempt['channel'] . ':' . $attempt['target'] . ':' . $attempt['options'];
+            if (isset($seen[$key])) return false;
+            $seen[$key] = true;
+            return true;
+        }));
+    }
+
+    private function channelSpyBase($channel)
+    {
+        $channel = trim((string)$channel);
+        if ($channel === '') return null;
+        $position = strrpos($channel, '-');
+        if ($position === false || $position <= 0) return $channel;
+        return substr($channel, 0, $position);
+    }
+
+    private function findActiveSpyTarget($extension)
+    {
+        $extension = preg_replace('/[^0-9*#]/', '', (string)$extension);
+        if ($extension === '') return null;
+
+        $output = [];
+        @exec('asterisk -rx ' . escapeshellarg('core show channels concise') . ' 2>&1', $output, $code);
+        if ($code !== 0 || empty($output)) return null;
+
+        $matches = [];
+        foreach ($output as $line) {
+            if (strpos($line, '!') === false) continue;
+            $fields = explode('!', trim($line));
+            $channel = isset($fields[0]) ? $fields[0] : '';
+            $context = isset($fields[1]) ? $fields[1] : '';
+            $exten = isset($fields[2]) ? $fields[2] : '';
+            $application = isset($fields[5]) ? $fields[5] : '';
+            $applicationData = isset($fields[6]) ? $fields[6] : '';
+            $callerId = isset($fields[7]) ? $fields[7] : '';
+            $bridged = $this->firstActiveChannelField(isset($fields[10]) ? $fields[10] : '', isset($fields[11]) ? $fields[11] : '');
+            $uniqueId = isset($fields[12]) ? trim($fields[12]) : '';
+            $linkedId = isset($fields[13]) ? trim($fields[13]) : '';
+
+            if (!$this->activeChannelMatchesExtension($extension, $channel, $bridged, $context, $exten, $callerId, $applicationData)) {
+                continue;
+            }
+            if (preg_match('/^(AppDial|Hangup|Congestion|Busy)$/i', $application)) {
+                continue;
+            }
+
+            $score = 0;
+            if (preg_match('/^(PJSIP|SIP|IAX2)\/' . preg_quote($extension, '/') . '[-@]/i', $channel)) $score += 50;
+            if (preg_match('/^(PJSIP|SIP|IAX2)\/' . preg_quote($extension, '/') . '[-@]/i', $bridged)) $score += 45;
+            if (stripos($channel, 'Local/') !== 0) $score += 10;
+            if ($bridged !== '') $score += 5;
+            $matches[] = [
+                'score' => $score,
+                'channel' => $channel,
+                'bridgedChannel' => $bridged,
+                'uniqueId' => $uniqueId,
+                'linkedId' => $linkedId,
+            ];
+        }
+
+        if (empty($matches)) return null;
+        usort($matches, function ($a, $b) { return $b['score'] <=> $a['score']; });
+        return $matches[0];
+    }
+
+    private function activeChannelMatchesExtension($extension, $channel, $bridged, $context, $exten, $callerId, $applicationData)
+    {
+        $quoted = preg_quote($extension, '/');
+        if (preg_match('/(?:^|\/|-)(' . $quoted . ')(?:[-@\/]|$)/', $channel)) return true;
+        if ($bridged && preg_match('/(?:^|\/|-)(' . $quoted . ')(?:[-@\/]|$)/', $bridged)) return true;
+        if ($exten === $extension) return true;
+        if ($callerId === $extension) return true;
+        if (strpos($context, 'from-internal') !== false && strpos($applicationData, '/' . $extension) !== false) return true;
+        return false;
+    }
+
+    private function firstActiveChannelField()
+    {
+        foreach (func_get_args() as $value) {
+            if ($value && preg_match('/(?:PJSIP|SIP|Local|IAX2)\//i', $value)) {
+                return $value;
+            }
+        }
+        return '';
     }
 
     private function discoverSystem()
@@ -445,7 +847,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             'recordingPaths' => $this->discoverRecordingPaths(),
             'logPaths' => $this->approvedLogPaths(),
             'commandProbes' => array_keys($this->approvedCommandProbes()),
-            'capabilities' => ['read_db_schema', 'read_cdr', 'scan_recordings', 'sync_inventory', 'read_active_channels', 'read_queue_status', 'tail_logs', 'fetch_approved_files', 'temporary_call_forward', 'self_update'],
+            'capabilities' => ['read_db_schema', 'read_cdr', 'scan_recordings', 'sync_inventory', 'read_active_channels', 'tail_logs', 'fetch_approved_files', 'temporary_call_forward', 'permanent_call_forward', 'supervision', 'self_update'],
         ];
     }
 
@@ -648,14 +1050,11 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $wanted = ['calldate', 'clid', 'src', 'dst', 'dcontext', 'channel', 'dstchannel', 'lastapp', 'lastdata', 'duration', 'billsec', 'disposition', 'amaflags', 'accountcode', 'uniqueid', 'userfield', 'recordingfile', 'cnum', 'cnam', 'outbound_cnum', 'outbound_cnam', 'did', 'linkedid', 'peeraccount', 'sequence'];
         $selected = array_values(array_intersect($wanted, $columns));
         $selectSql = implode(', ', array_map(function ($column) { return '`' . str_replace('`', '', $column) . '`'; }, $selected));
-        $limit = max(1, min((int)($input['limit'] ?? 1000), 5000));
-        $lookbackDays = max(1, min((int)($input['lookbackDays'] ?? 14), 365));
-        $since = gmdate('Y-m-d H:i:s', time() - 86400 * $lookbackDays);
-        if (!empty($config['lastCallSyncAt'])) {
-            $time = strtotime((string) $config['lastCallSyncAt']);
-            if ($time) $since = gmdate('Y-m-d H:i:s', $time - 3600);
-        }
-        $stmt = $pdo->prepare("SELECT {$selectSql} FROM cdr WHERE calldate >= :since ORDER BY calldate DESC LIMIT {$limit}");
+        $limit = max(1, min((int)($input['limit'] ?? 10000), 50000));
+        $offset = max(0, min((int)($input['offset'] ?? 0), 1000000));
+        $lookbackDays = max(1, min((int)($input['lookbackDays'] ?? 3650), 3650));
+        $since = date('Y-m-d H:i:s', time() - 86400 * $lookbackDays);
+        $stmt = $pdo->prepare("SELECT {$selectSql} FROM cdr WHERE calldate >= :since ORDER BY calldate DESC LIMIT {$limit} OFFSET {$offset}");
         $stmt->execute(['since' => $since]);
         $calls = [];
         while ($row = $stmt->fetch(\PDO::FETCH_ASSOC)) $calls[] = $this->mapCdrRow($row, $config);
@@ -802,11 +1201,13 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 
     private function safeRecordingPath($path)
     {
-        $config = $this->getConnectorConfig();
-        $base = realpath($config['recordingsPath'] ?? '/var/spool/asterisk/monitor');
         $real = realpath((string) $path);
-        if (!$base || !$real || strpos($real, $base) !== 0) return null;
-        return $real;
+        if (!$real) return null;
+        foreach ($this->discoverRecordingPaths() as $root) {
+            $base = realpath($root);
+            if ($base && strpos($real, $base) === 0) return $real;
+        }
+        return null;
     }
 
     private function readRecentCdrRows(array $config)
@@ -885,7 +1286,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             'cnam' => $row['cnam'] ?? null,
             'outbound_cnum' => $row['outbound_cnum'] ?? null,
             'outbound_cnam' => $row['outbound_cnam'] ?? null,
-            'recordingAvailable' => (bool) ($recordingFile || $recordingPath),
+            'recordingAvailable' => (bool) $recordingPath,
             'recordingFile' => $recordingFile,
             'recordingFilePath' => $recordingPath,
             'rawCdr' => $row,
@@ -896,18 +1297,37 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
     {
         $recordingFile = trim((string) $recordingFile);
         if ($recordingFile === '') return null;
-        if ($recordingFile[0] === '/' && is_file($recordingFile)) return $recordingFile;
+        if ($recordingFile[0] === '/' && $this->recordingFileHasAudio($recordingFile)) return $recordingFile;
         $base = rtrim($config['recordingsPath'] ?? '/var/spool/asterisk/monitor', '/');
-        $candidates = [$base . '/' . $recordingFile];
+        $roots = $this->discoverRecordingPaths();
+        array_unshift($roots, $base);
+        $roots = array_values(array_unique(array_filter($roots)));
+        $candidates = [];
         $timestamp = $calldate ? strtotime((string) $calldate) : false;
-        if ($timestamp) {
-            $candidates[] = $base . '/' . gmdate('Y/m/d', $timestamp) . '/' . $recordingFile;
-            $candidates[] = $base . '/' . gmdate('Y/m', $timestamp) . '/' . $recordingFile;
+        foreach ($roots as $root) {
+            $root = rtrim($root, '/');
+            $candidates[] = $root . '/' . $recordingFile;
+            if ($timestamp) {
+                $candidates[] = $root . '/' . date('Y/m/d', $timestamp) . '/' . $recordingFile;
+                $candidates[] = $root . '/' . date('Y/m', $timestamp) . '/' . $recordingFile;
+                $candidates[] = $root . '/' . gmdate('Y/m/d', $timestamp) . '/' . $recordingFile;
+                $candidates[] = $root . '/' . gmdate('Y/m', $timestamp) . '/' . $recordingFile;
+            }
         }
         foreach ($candidates as $candidate) {
-            if (is_file($candidate)) return $candidate;
+            if ($this->recordingFileHasAudio($candidate)) return $candidate;
         }
-        return $candidates[0];
+        return null;
+    }
+
+    private function recordingFileHasAudio($path)
+    {
+        if (!is_file($path) || !is_readable($path)) {
+            return false;
+        }
+
+        $size = filesize($path);
+        return $size !== false && $size > 44;
     }
 
     private function getLocalIp()
@@ -978,7 +1398,6 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             'fwconsole_ma_list' => 'fwconsole ma list',
             'asterisk_version' => 'asterisk -rx "core show version"',
             'active_channels' => 'asterisk -rx "core show channels concise"',
-            'queue_status' => 'asterisk -rx "queue show all"',
             'disk_usage' => 'df -h',
             'memory' => 'free -m',
             'uptime' => 'uptime',
@@ -1061,7 +1480,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $json = json_encode($payload);
         $headers = array_merge(['Content-Type: application/json', 'Accept: application/json'], $headers);
         $ch = curl_init($url);
-        curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $json, CURLOPT_HTTPHEADER => $headers, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 30, CURLOPT_SSL_VERIFYPEER => true, CURLOPT_SSL_VERIFYHOST => 2]);
+        curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $json, CURLOPT_HTTPHEADER => $headers, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 120, CURLOPT_SSL_VERIFYPEER => true, CURLOPT_SSL_VERIFYHOST => 2]);
         $body = curl_exec($ch);
         $statusCode = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
         curl_close($ch);

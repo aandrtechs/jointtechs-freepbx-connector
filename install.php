@@ -28,9 +28,11 @@ function jointtechsconnector_install_sync_cron()
     $calls = $moduleDir . '/bin/sync-calls.php';
     $recordings = $moduleDir . '/bin/sync-recordings.php';
     $heartbeat = $moduleDir . '/bin/heartbeat.php';
+    $forwardExpiry = $moduleDir . '/bin/expire-forward.php';
     @chmod($calls, 0755);
     @chmod($recordings, 0755);
     @chmod($heartbeat, 0755);
+    @chmod($forwardExpiry, 0755);
 
     $cron = <<<CRON
 */5 * * * * asterisk php {$calls} >/dev/null 2>&1

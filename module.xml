@@ -2,14 +2,14 @@
 <module>
   <rawname>jointtechsconnector</rawname>
   <name>Jointtechs Connector</name>
-  <version>1.0.8</version>
+  <version>1.0.21</version>
   <category>Connectivity</category>
   <publisher>Jointtechs</publisher>
   <license>GPLv3+</license>
   <licenselink>https://www.gnu.org/licenses/gpl-3.0.txt</licenselink>
   <info>https://portal.joint.tech</info>
-  <description>Jointtechs PBX agent for read-only discovery, CDR/recording sync, live channel status, diagnostics, playback, and approved framework updates.</description>
-  <changelog>*1.0.8* Reinstall the automatic sync cron from heartbeat/config flows so calls keep syncing without manual resync.
+  <description>Jointtechs PBX agent for discovery, CDR/recording sync, live status, diagnostics, playback, approved forwarding management, supervision, and framework updates.</description>
+  <changelog>*1.0.21* Add duration-based and until-removed call forwarding with generation-safe timers and durable expiry reconciliation after PBX restarts.`n*1.0.20* Ring the supervisor through the FreePBX from-internal dialplan first while keeping OpDesk-style ChanSpy target options.`n*1.0.19* Match OpDesk supervision flow: originate directly to supervisor endpoint and ChanSpy the target channel base with qsE/qwsE/qBsE.`n*1.0.18* Prefer the full active channel name for supervision before uniqueid to avoid immediate spy hangups on PBXs with different concise field layouts.`n*1.0.17* Resolve the exact active Asterisk channel before Listen, Whisper, and Barge, then use ChanSpy against the channel uniqueid.`n*1.0.16* Add approved immediate removal for extension call forwarding from the portal.`n*1.0.15* Use FreePBX extension spying for Listen, Whisper, and Barge so the supervisor hears the selected active extension.`n*1.0.14* Ignore empty recording files during CDR sync so playback buttons only show for real audio.`n*1.0.13* Page historical CDR sync so large PBXs can import older calls without one oversized portal request.`n*1.0.12* Expand call sync to a deep historical CDR window so All Calls can include older PBX rows.`n*1.0.11* Add approved listen, whisper, and barge supervision commands for the live wallboard.`n*1.0.10* Allow larger live CDR batches to complete without portal request timeout.`n*1.0.9* Keep CDR sync on a rolling live window and resolve recordings only when files exist in approved recording paths.`n*1.0.8* Reinstall the automatic sync cron from heartbeat/config flows so calls keep syncing without manual resync.
 *1.0.7* Add an approved read-only Asterisk active-channel probe for the live wallboard.
 *1.0.6* Add SIP/PJSIP endpoint registration status for the live wallboard.
 *1.0.5* Add approved temporary extension call forwarding from the portal.
