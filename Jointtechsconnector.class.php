@@ -695,6 +695,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $attempts = $this->supervisionAttempts($supervisor, $target, $spyBase, $options);
         $stdout = '';
         $code = 1;
+        $accepted = false;
         $spyChannel = 'Local/' . $supervisor . '@from-internal/n';
         $spyTarget = $target . '@from-internal';
         $spyOptions = $options;
@@ -708,16 +709,18 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             $output = [];
             @exec($command . ' 2>&1', $output, $code);
             $stdout = implode("\n", $output);
-            if ($code === 0 && stripos($stdout, 'no such application') === false && stripos($stdout, 'not found') === false && stripos($stdout, 'no such channel') === false) {
+            $accepted = $this->supervisionCommandAccepted($code, $stdout);
+            if ($accepted) {
                 break;
             }
         }
 
         return [
-            'status' => $code === 0,
-            'message' => $code === 0 ? ucfirst($mode) . ' action sent.' : ucfirst($mode) . ' action failed.',
+            'status' => $accepted,
+            'message' => $accepted ? ucfirst($mode) . ' call queued to extension ' . $supervisor . '.' : ucfirst($mode) . ' action failed.',
             'stdout' => $stdout,
-            'error' => $code === 0 ? null : $stdout,
+            'error' => $accepted ? null : $stdout,
+            'deliveryStatus' => $accepted ? 'queued' : 'failed',
             'mode' => $mode,
             'supervisorExtension' => $supervisor,
             'targetExtension' => $target,
@@ -728,11 +731,25 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         ];
     }
 
+    private function supervisionCommandAccepted($code, $stdout)
+    {
+        if ((int)$code !== 0) return false;
+        $failureMarkers = [
+            'no such application', 'not found', 'no such channel',
+            'unable to create channel', 'unable to request channel',
+            'extension does not exist', 'does not exist in context',
+        ];
+        foreach ($failureMarkers as $marker) {
+            if (stripos((string)$stdout, $marker) !== false) return false;
+        }
+        return true;
+    }
+
     private function supervisionAttempts($supervisor, $target, $spyBase, $options)
     {
         $attempts = [];
         $targets = array_values(array_filter([$spyBase, 'PJSIP/' . $target, 'SIP/' . $target]));
-        $supervisorChannels = ['Local/' . $supervisor . '@from-internal/n', 'PJSIP/' . $supervisor, 'SIP/' . $supervisor];
+        $supervisorChannels = ['PJSIP/' . $supervisor, 'SIP/' . $supervisor, 'Local/' . $supervisor . '@from-internal/n'];
         foreach ($supervisorChannels as $channel) {
             foreach ($targets as $targetChannel) {
                 $attempts[] = ['channel' => $channel, 'target' => $targetChannel, 'options' => $options];
