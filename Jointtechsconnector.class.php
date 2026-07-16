@@ -5,7 +5,7 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '1.0.23';
+    private const MODULE_VERSION = '1.0.24';
     private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
     private const FORWARD_MARKER_FAMILY = 'JOINTTECHS_CF_EXPIRY';
 
@@ -749,7 +749,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
     {
         $attempts = [];
         $targets = array_values(array_filter([$spyBase, 'PJSIP/' . $target, 'SIP/' . $target]));
-        $supervisorChannels = ['PJSIP/' . $supervisor, 'SIP/' . $supervisor, 'Local/' . $supervisor . '@from-internal/n'];
+        $supervisorChannels = ['Local/' . $supervisor . '@from-internal/n', 'PJSIP/' . $supervisor, 'SIP/' . $supervisor];
         foreach ($supervisorChannels as $channel) {
             foreach ($targets as $targetChannel) {
                 $attempts[] = ['channel' => $channel, 'target' => $targetChannel, 'options' => $options];
