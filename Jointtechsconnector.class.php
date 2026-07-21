@@ -5,7 +5,7 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '1.1.0';
+    private const MODULE_VERSION = '1.1.2';
     private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
     private const FORWARD_MARKER_FAMILY = 'JOINTTECHS_CF_EXPIRY';
 
@@ -503,6 +503,43 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         ];
     }
 
+    private function discoverVoicemailFromConfigFiles()
+    {
+        $items = [];
+        foreach (glob('/etc/asterisk/voicemail*.conf') ?: [] as $path) {
+            if (!is_file($path) || !is_readable($path)) continue;
+            $context = '';
+            foreach (file($path, FILE_IGNORE_NEW_LINES) ?: [] as $line) {
+                $line = trim((string)preg_replace('/\s+;.*$/', '', (string)$line));
+                if ($line === '' || $line[0] === ';' || $line[0] === '#') continue;
+                if (preg_match('/^\[([^\]]+)\]$/', $line, $section)) {
+                    $context = trim($section[1]);
+                    continue;
+                }
+                if ($context === '' || in_array(strtolower($context), ['general', 'zonemessages', 'pbxaliases', 'device'], true)) continue;
+                if (!preg_match('/^([0-9*#]+)\s*=>\s*(.+)$/', $line, $matches)) continue;
+                $fields = str_getcsv($matches[2]);
+                $extension = trim($matches[1]);
+                $options = [];
+                foreach (explode('|', (string)($fields[4] ?? '')) as $option) {
+                    $parts = explode('=', $option, 2);
+                    if (count($parts) === 2) $options[trim($parts[0])] = trim($parts[1]);
+                }
+                $items[$extension] = [
+                    'enabled' => true,
+                    'name' => trim((string)($fields[1] ?? '')),
+                    'password' => trim((string)($fields[0] ?? '')),
+                    'email' => trim((string)($fields[2] ?? '')),
+                    'pager' => trim((string)($fields[3] ?? '')),
+                    'emailAttachment' => $this->booleanValue($options['attach'] ?? true),
+                    'deleteAfterEmail' => $this->booleanValue($options['delete'] ?? false),
+                    'vmcontext' => $context,
+                    'options' => $options,
+                ];
+            }
+        }
+        return $items;
+    }
     private function getVoicemailSettings(\PDO $pdo, $extension)
     {
         $module = $this->voicemailModule();
@@ -510,6 +547,8 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             $mailbox = $module->getMailbox($extension, false);
             if (is_array($mailbox) && !empty($mailbox)) return $this->normalizeVoicemailMailbox($mailbox);
         }
+        $configured = $this->discoverVoicemailFromConfigFiles();
+        if (isset($configured[$extension])) return $configured[$extension];
         foreach ($this->queryRows($pdo, 'voicemail_users', ['extension', 'name', 'password', 'email', 'attach', 'delete', 'context', 'options', 'pager']) as $row) {
             if ((string)($row['extension'] ?? '') === (string)$extension) return $this->normalizeVoicemailMailbox($row);
         }
@@ -1255,11 +1294,13 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             $followMeByExtension = $this->discoverFollowMeByExtension($pdo);
             $callForwardingByExtension = $this->discoverCallForwardingByExtension();
             $endpointStatusByExtension = $this->discoverEndpointStatusByExtension();
-            foreach ($this->queryRows($pdo, 'users', ['extension', 'name', 'outboundcid', 'sipname']) as $row) {
+            foreach ($this->queryRows($pdo, 'users', ['extension', 'name', 'outboundcid', 'sipname', 'voicemail']) as $row) {
                 $extension = (string)($row['extension'] ?? '');
                 if ($extension === '') continue;
                 $metadata = $row;
-                $metadata['voicemail'] = $voicemailByExtension[$extension] ?? ['enabled' => false];
+                $voicemailFlag = strtolower(trim((string)($row['voicemail'] ?? '')));
+                $metadata['voicemail'] = $voicemailByExtension[$extension]
+                    ?? ['enabled' => $voicemailFlag !== '' && !in_array($voicemailFlag, ['novm', 'disabled', 'no', 'false', '0'], true)];
                 $metadata['followMe'] = $followMeByExtension[$extension] ?? ['enabled' => false];
                 $metadata['callForwarding'] = $callForwardingByExtension[$extension] ?? [];
                 $metadata['endpointStatus'] = $endpointStatusByExtension[$extension] ?? ['state' => 'unknown', 'tech' => null];
@@ -1368,6 +1409,12 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
                     }
                 }
             }
+        }
+        if (!empty($items)) return $items;
+        $configured = $this->discoverVoicemailFromConfigFiles();
+        foreach ($configured as $extension => $metadata) {
+            unset($metadata['password']);
+            $items[$extension] = $metadata;
         }
         if (!empty($items)) return $items;
         foreach ($this->queryRows($pdo, 'voicemail_users', ['extension', 'name', 'email', 'pager', 'options', 'saycid', 'envelope', 'attach', 'delete', 'context']) as $row) {
