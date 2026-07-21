@@ -419,18 +419,15 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             if ((string)($row['extension'] ?? '') === $extension) { $user = $row; break; }
         }
         if (!$user) return ['status' => false, 'error' => 'Extension was not found.'];
-        $voicemail = null;
-        foreach ($this->queryRows($pdo, 'voicemail_users', ['extension', 'name', 'password', 'email', 'attach', 'delete']) as $row) {
-            if ((string)($row['extension'] ?? '') === $extension) { $voicemail = $row; break; }
-        }
+        $voicemail = $this->getVoicemailSettings($pdo, $extension);
         return [
             'status' => true, 'name' => (string)($user['name'] ?? $extension),
             'outboundCid' => (string)($user['outboundcid'] ?? ''),
-            'voicemailEnabled' => (bool)$voicemail,
+            'voicemailEnabled' => $voicemail !== null,
             'voicemailPassword' => (string)($voicemail['password'] ?? ''),
             'voicemailEmail' => (string)($voicemail['email'] ?? ''),
-            'emailAttachment' => $this->booleanValue($voicemail['attach'] ?? true),
-            'deleteAfterEmail' => $this->booleanValue($voicemail['delete'] ?? false),
+            'emailAttachment' => $this->booleanValue($voicemail['emailAttachment'] ?? $voicemail['attach'] ?? true),
+            'deleteAfterEmail' => $this->booleanValue($voicemail['deleteAfterEmail'] ?? $voicemail['delete'] ?? false),
         ];
     }
 
@@ -452,20 +449,16 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             $check = $pdo->prepare('SELECT COUNT(*) FROM users WHERE extension = :extension');
             $check->execute(['extension' => $extension]);
             if (!(int)$check->fetchColumn()) throw new \RuntimeException('Extension was not found.');
-            if (!$enabled) {
-                $statement = $pdo->prepare('DELETE FROM voicemail_users WHERE extension = :extension');
-                $statement->execute(['extension' => $extension]);
-            } else {
-                $columns = $this->tableColumns($pdo, 'voicemail_users');
-                $values = ['context' => 'default', 'extension' => $extension, 'name' => $name, 'password' => $password ?: $extension, 'email' => $email, 'attach' => $this->booleanValue($input['emailAttachment'] ?? true) ? 'yes' : 'no', 'delete' => $this->booleanValue($input['deleteAfterEmail'] ?? false) ? 'yes' : 'no'];
-                $values = array_intersect_key($values, array_flip($columns));
-                $names = array_keys($values);
-                $sqlColumns = implode(', ', $names);
-                $placeholders = implode(', ', array_map(function ($column) { return ':' . $column; }, $names));
-                $updates = implode(', ', array_map(function ($column) { return $column . ' = VALUES(' . $column . ')'; }, array_diff($names, ['extension', 'context'])));
-                $statement = $pdo->prepare("INSERT INTO voicemail_users ({$sqlColumns}) VALUES ({$placeholders}) ON DUPLICATE KEY UPDATE {$updates}");
-                $statement->execute($values);
-            }
+            $this->saveVoicemailSettings(
+                $pdo,
+                $extension,
+                $name,
+                $password,
+                $email,
+                $enabled,
+                $this->booleanValue($input['emailAttachment'] ?? true),
+                $this->booleanValue($input['deleteAfterEmail'] ?? false)
+            );
             $pdo->commit();
         } catch (\Throwable $exception) {
             if ($pdo->inTransaction()) $pdo->rollBack();
@@ -473,6 +466,182 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         }
         $this->reloadFreePbx();
         return ['status' => true, 'message' => 'Extension and voicemail settings updated.', 'extension' => $extension];
+    }
+
+    private function voicemailModule()
+    {
+        try {
+            if (!class_exists('\FreePBX')) return null;
+            $module = \FreePBX::Voicemail();
+            return is_object($module) && method_exists($module, 'getMailbox') ? $module : null;
+        } catch (\Throwable $exception) {
+            return null;
+        }
+    }
+
+    private function normalizeVoicemailMailbox(array $mailbox)
+    {
+        $options = $mailbox['options'] ?? [];
+        if (is_string($options)) {
+            $parsed = [];
+            foreach (explode('|', $options) as $option) {
+                $parts = explode('=', $option, 2);
+                if (count($parts) === 2) $parsed[trim($parts[0])] = trim($parts[1]);
+            }
+            $options = $parsed;
+        }
+        if (!is_array($options)) $options = [];
+        return [
+            'name' => (string)($mailbox['name'] ?? ''),
+            'password' => (string)($mailbox['pwd'] ?? $mailbox['password'] ?? ''),
+            'email' => (string)($mailbox['email'] ?? ''),
+            'pager' => (string)($mailbox['pager'] ?? ''),
+            'emailAttachment' => $this->booleanValue($options['attach'] ?? $mailbox['attach'] ?? true),
+            'deleteAfterEmail' => $this->booleanValue($options['delete'] ?? $mailbox['delete'] ?? false),
+            'vmcontext' => (string)($mailbox['vmcontext'] ?? $mailbox['context'] ?? 'default'),
+            'options' => $options,
+        ];
+    }
+
+    private function getVoicemailSettings(\PDO $pdo, $extension)
+    {
+        $module = $this->voicemailModule();
+        if ($module) {
+            $mailbox = $module->getMailbox($extension, false);
+            if (is_array($mailbox) && !empty($mailbox)) return $this->normalizeVoicemailMailbox($mailbox);
+        }
+        foreach ($this->queryRows($pdo, 'voicemail_users', ['extension', 'name', 'password', 'email', 'attach', 'delete', 'context', 'options', 'pager']) as $row) {
+            if ((string)($row['extension'] ?? '') === (string)$extension) return $this->normalizeVoicemailMailbox($row);
+        }
+        return null;
+    }
+
+    private function saveVoicemailSettings(\PDO $pdo, $extension, $name, $password, $email, $enabled, $emailAttachment, $deleteAfterEmail)
+    {
+        $module = $this->voicemailModule();
+        if ($module) {
+            $existing = $module->getMailbox($extension, false);
+            if (!$enabled) {
+                if (is_array($existing) && !empty($existing)) $module->delMailbox($extension, false);
+                return;
+            }
+            if (is_array($existing) && !empty($existing)) {
+                $settings = $existing;
+                $settings['pwd'] = $password !== '' ? $password : (string)($existing['pwd'] ?? $extension);
+                $settings['name'] = $name;
+                $settings['email'] = $email;
+                $settings['pager'] = (string)($existing['pager'] ?? '');
+                $settings['vmcontext'] = (string)($existing['vmcontext'] ?? 'default');
+                $options = isset($existing['options']) && is_array($existing['options']) ? $existing['options'] : [];
+                $options['attach'] = $emailAttachment ? 'yes' : 'no';
+                $options['delete'] = $deleteAfterEmail ? 'yes' : 'no';
+                $settings['options'] = $options;
+                $module->updateMailbox($extension, $settings, false);
+            } else {
+                $module->addMailbox($extension, [
+                    'vm' => 'enabled',
+                    'vmcontext' => 'default',
+                    'vmpwd' => $password !== '' ? $password : $extension,
+                    'name' => $name,
+                    'email' => $email,
+                    'pager' => '',
+                    'options' => '',
+                    'attach' => $emailAttachment ? 'attach=yes' : 'no',
+                    'vmdelete' => $deleteAfterEmail ? 'delete=yes' : 'no',
+                ], false);
+            }
+            return;
+        }
+
+        if (!$enabled) {
+            $statement = $pdo->prepare('DELETE FROM voicemail_users WHERE extension = :extension');
+            $statement->execute(['extension' => $extension]);
+            return;
+        }
+        $columns = $this->tableColumns($pdo, 'voicemail_users');
+        $values = ['context' => 'default', 'extension' => $extension, 'name' => $name, 'password' => $password ?: $extension, 'email' => $email, 'attach' => $emailAttachment ? 'yes' : 'no', 'delete' => $deleteAfterEmail ? 'yes' : 'no'];
+        $values = array_intersect_key($values, array_flip($columns));
+        $names = array_keys($values);
+        $sqlColumns = implode(', ', $names);
+        $placeholders = implode(', ', array_map(function ($column) { return ':' . $column; }, $names));
+        $updates = implode(', ', array_map(function ($column) { return $column . ' = VALUES(' . $column . ')'; }, array_diff($names, ['extension', 'context'])));
+        $statement = $pdo->prepare("INSERT INTO voicemail_users ({$sqlColumns}) VALUES ({$placeholders}) ON DUPLICATE KEY UPDATE {$updates}");
+        $statement->execute($values);
+    }
+    private function emailRecipientsFromValue($value)
+    {
+        $emails = preg_split('/[,;|]+/', (string)$value);
+        return array_values(array_unique(array_filter(array_map(function ($email) {
+            $email = strtolower(trim((string)$email));
+            return filter_var($email, FILTER_VALIDATE_EMAIL) ? $email : null;
+        }, $emails))));
+    }
+
+    private function faxUsers(\PDO $pdo)
+    {
+        $users = [];
+        foreach ($this->queryRows($pdo, 'fax_users', ['user', 'faxenabled', 'faxemail', 'faxattachformat']) as $row) {
+            $user = trim((string)($row['user'] ?? ''));
+            if ($user !== '') $users[$user] = $row;
+        }
+        return $users;
+    }
+
+    private function faxDestinationUser($value, array $users)
+    {
+        foreach (preg_split('/[^0-9*#]+/', (string)$value) as $candidate) {
+            if ($candidate !== '' && isset($users[$candidate])) return $candidate;
+        }
+        return null;
+    }
+
+    private function faxRecipientsFromRow(array $row, array $users)
+    {
+        $recipients = [];
+        foreach (['faxemail', 'legacy_email'] as $key) {
+            if (!empty($row[$key])) $recipients = array_merge($recipients, $this->emailRecipientsFromValue($row[$key]));
+        }
+        foreach (['faxexten', 'destination'] as $key) {
+            $user = $this->faxDestinationUser($row[$key] ?? '', $users);
+            if ($user && !empty($users[$user]['faxemail'])) $recipients = array_merge($recipients, $this->emailRecipientsFromValue($users[$user]['faxemail']));
+        }
+        return array_values(array_unique($recipients));
+    }
+
+    private function discoverFaxRoutes(\PDO $pdo, array $incomingRows, $tier)
+    {
+        $routes = [];
+        $users = $this->faxUsers($pdo);
+        $faxIncoming = $this->queryRows($pdo, 'fax_incoming', ['cidnum', 'extension', 'detection', 'detectionwait', 'destination', 'legacy_email', 'ring']);
+
+        foreach ($faxIncoming as $row) {
+            $number = preg_replace('/\D/', '', (string)($row['extension'] ?? ''));
+            if (strlen($number) < 10 || strlen($number) > 11) continue;
+            $recipients = $this->faxRecipientsFromRow($row, $users);
+            $routes[$number] = array_merge($row, ['tier' => $tier, 'recipients' => $tier === 'regular' ? array_slice($recipients, 0, 1) : $recipients]);
+        }
+
+        foreach ($incomingRows as $row) {
+            $number = preg_replace('/\D/', '', (string)($row['extension'] ?? ''));
+            if (strlen($number) < 10 || strlen($number) > 11) continue;
+            $matched = null;
+            foreach ($faxIncoming as $faxRow) {
+                if ((string)($faxRow['extension'] ?? '') === (string)($row['extension'] ?? '') && (string)($faxRow['cidnum'] ?? '') === (string)($row['cidnum'] ?? '')) {
+                    $matched = $faxRow;
+                    break;
+                }
+            }
+            $combined = array_merge($row, is_array($matched) ? $matched : []);
+            $hasFaxDestination = stripos((string)($combined['destination'] ?? ''), 'fax') !== false
+                || trim((string)($combined['faxexten'] ?? '')) !== ''
+                || trim((string)($combined['faxemail'] ?? '')) !== ''
+                || trim((string)($combined['legacy_email'] ?? '')) !== '';
+            if (!$hasFaxDestination && !isset($routes[$number])) continue;
+            $recipients = array_merge($routes[$number]['recipients'] ?? [], $this->faxRecipientsFromRow($combined, $users));
+            $recipients = array_values(array_unique($recipients));
+            $routes[$number] = array_merge($combined, ['tier' => $tier, 'recipients' => $tier === 'regular' ? array_slice($recipients, 0, 1) : $recipients]);
+        }
+        return $routes;
     }
 
     private function updateFaxRoute(array $input)
@@ -483,22 +652,54 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         if (strlen($number) < 10 || strlen($number) > 11 || empty($recipients)) return ['status' => false, 'error' => 'Fax number and recipient are required.'];
         foreach ($recipients as $email) if (!filter_var($email, FILTER_VALIDATE_EMAIL)) return ['status' => false, 'error' => 'A fax recipient email is invalid.'];
         if ($tier !== 'pro' && count($recipients) !== 1) return ['status' => false, 'error' => 'Fax Regular supports exactly one recipient.'];
+
         $pdo = $this->getAmpPdo();
-        if (!$this->tableExists($pdo, 'incoming')) return ['status' => false, 'error' => 'FreePBX inbound routes table was not found.'];
-        $columns = $this->tableColumns($pdo, 'incoming');
-        if (!in_array('faxemail', $columns, true) || !in_array('extension', $columns, true)) return ['status' => false, 'error' => 'FreePBX fax email fields are unavailable.'];
-        $statement = $pdo->prepare('UPDATE incoming SET faxemail = :email WHERE extension = :number');
-        $statement->execute(['email' => implode(',', $recipients), 'number' => $number]);
-        $check = $pdo->prepare('SELECT COUNT(*) FROM incoming WHERE extension = :number');
-        $check->execute(['number' => $number]);
-        if (!(int)$check->fetchColumn()) return ['status' => false, 'error' => 'Fax route was not found.'];
+        $emailValue = implode(',', $recipients);
+        $updated = false;
+        $users = $this->faxUsers($pdo);
+        $faxIncoming = $this->queryRows($pdo, 'fax_incoming', ['cidnum', 'extension', 'destination', 'legacy_email']);
+        foreach ($faxIncoming as $row) {
+            if (preg_replace('/\D/', '', (string)($row['extension'] ?? '')) !== $number) continue;
+            $user = $this->faxDestinationUser($row['destination'] ?? '', $users);
+            if ($user && $this->tableExists($pdo, 'fax_users') && in_array('faxemail', $this->tableColumns($pdo, 'fax_users'), true)) {
+                $statement = $pdo->prepare('UPDATE fax_users SET faxemail = :email WHERE user = :user');
+                $statement->execute(['email' => $emailValue, 'user' => $user]);
+                $updated = $statement->rowCount() > 0 || isset($users[$user]);
+            }
+            if (in_array('legacy_email', $this->tableColumns($pdo, 'fax_incoming'), true)) {
+                $statement = $pdo->prepare('UPDATE fax_incoming SET legacy_email = :email WHERE extension = :number AND cidnum = :cidnum');
+                $statement->execute(['email' => $emailValue, 'number' => $row['extension'], 'cidnum' => (string)($row['cidnum'] ?? '')]);
+                $updated = true;
+            }
+        }
+
+        foreach ($this->queryRows($pdo, 'incoming', ['cidnum', 'extension', 'destination', 'faxexten']) as $row) {
+            if (preg_replace('/\D/', '', (string)($row['extension'] ?? '')) !== $number) continue;
+            foreach ([$row['faxexten'] ?? '', $row['destination'] ?? ''] as $destination) {
+                $user = $this->faxDestinationUser($destination, $users);
+                if (!$user || !$this->tableExists($pdo, 'fax_users') || !in_array('faxemail', $this->tableColumns($pdo, 'fax_users'), true)) continue;
+                $statement = $pdo->prepare('UPDATE fax_users SET faxemail = :email WHERE user = :user');
+                $statement->execute(['email' => $emailValue, 'user' => $user]);
+                $updated = true;
+            }
+        }
+
+        if (!$updated && $this->tableExists($pdo, 'incoming')) {
+            $columns = $this->tableColumns($pdo, 'incoming');
+            if (in_array('faxemail', $columns, true) && in_array('extension', $columns, true)) {
+                $statement = $pdo->prepare('UPDATE incoming SET faxemail = :email WHERE extension = :number');
+                $statement->execute(['email' => $emailValue, 'number' => $number]);
+                $updated = $statement->rowCount() > 0;
+            }
+        }
+        if (!$updated) return ['status' => false, 'error' => 'Fax route was not found.'];
+
         $this->reloadFreePbx();
         return ['status' => true, 'message' => 'Incoming fax recipients updated.', 'tier' => $tier, 'recipientCount' => count($recipients)];
     }
-
     private function sendFax(array $input)
     {
-        if ($this->detectFaxTier() !== 'pro') return ['status' => false, 'error' => 'Sending requires FreePBX Fax Pro.'];
+        if ($this->detectFaxTier() !== 'pro') return ['status' => false, 'error' => 'Sending requires Fax Pro.'];
         $from = preg_replace('/\D/', '', (string)($input['from'] ?? ''));
         $to = preg_replace('/\D/', '', (string)($input['to'] ?? ''));
         $content = base64_decode((string)($input['contentBase64'] ?? ''), true);
@@ -1070,30 +1271,30 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
                 $items[] = ['type' => 'ring_group', 'objectId' => $number, 'number' => $number, 'name' => $row['description'] ?? ('Ring Group ' . $number), 'metadata' => $row];
             }
             $faxTier = $this->detectFaxTier();
-            foreach ($this->queryRows($pdo, 'incoming', ['cidnum', 'extension', 'destination', 'faxexten', 'faxemail', 'description']) as $row) {
+            $incomingRows = $this->queryRows($pdo, 'incoming', ['cidnum', 'extension', 'destination', 'faxexten', 'faxemail', 'description']);
+            $faxRoutes = $this->discoverFaxRoutes($pdo, $incomingRows, $faxTier);
+            $seenFaxRoutes = [];
+            foreach ($incomingRows as $row) {
                 $number = preg_replace('/\D/', '', (string)($row['extension'] ?? ''));
                 if (strlen($number) < 10 || strlen($number) > 11) continue;
                 $name = $row['description'] ?? ('Inbound route ' . $number);
                 $items[] = ['type' => 'inbound_route', 'objectId' => $number, 'number' => $number, 'name' => $name, 'metadata' => $row];
-                $faxEmail = trim((string)($row['faxemail'] ?? ''));
-                if ($faxEmail !== '' || !empty($row['faxexten'])) {
-                    $faxMetadata = $row;
-                    $faxMetadata['tier'] = $faxTier;
-                    $faxMetadata['recipients'] = array_values(array_filter(array_map('trim', preg_split('/[,;]/', $faxEmail))));
-                    $items[] = ['type' => 'fax_route', 'objectId' => $number, 'number' => $number, 'name' => $name, 'metadata' => $faxMetadata];
+                if (isset($faxRoutes[$number])) {
+                    $items[] = ['type' => 'fax_route', 'objectId' => $number, 'number' => $number, 'name' => $name, 'metadata' => $faxRoutes[$number]];
+                    $seenFaxRoutes[$number] = true;
                 }
+            }
+            foreach ($faxRoutes as $number => $faxMetadata) {
+                if (isset($seenFaxRoutes[$number])) continue;
+                $items[] = ['type' => 'fax_route', 'objectId' => $number, 'number' => $number, 'name' => 'Fax ' . $number, 'metadata' => $faxMetadata];
             }
             foreach ($this->queryRows($pdo, 'ivr_details', ['id', 'name', 'description', 'announcement']) as $row) {
                 $id = (string)($row['id'] ?? '');
                 if ($id === '') continue;
                 $items[] = ['type' => 'ivr', 'objectId' => $id, 'number' => $id, 'name' => $row['name'] ?? $row['description'] ?? ('IVR ' . $id), 'metadata' => $row];
             }
-            foreach ($this->queryRows($pdo, 'voicemail_users', ['extension', 'name', 'email', 'pager']) as $row) {
-                $extension = (string)($row['extension'] ?? '');
-                if ($extension === '') continue;
-                $metadata = $row;
-                $metadata['voicemail'] = array_merge(['enabled' => true], $row);
-                $items[] = ['type' => 'voicemail', 'objectId' => $extension, 'extension' => $extension, 'number' => $extension, 'name' => $row['name'] ?? ('Voicemail ' . $extension), 'metadata' => $metadata];
+            foreach ($voicemailByExtension as $extension => $metadata) {
+                $items[] = ['type' => 'voicemail', 'objectId' => $extension, 'extension' => $extension, 'number' => $extension, 'name' => $metadata['name'] ?? ('Voicemail ' . $extension), 'metadata' => ['voicemail' => $metadata]];
             }
         } catch (\Throwable $exception) {
             return [['type' => 'sync_error', 'objectId' => 'inventory', 'name' => 'Inventory sync failed', 'metadata' => ['error' => $this->sanitizeMessage($exception->getMessage())]]];
@@ -1149,11 +1350,33 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
     private function discoverVoicemailByExtension(\PDO $pdo)
     {
         $items = [];
-        foreach ($this->queryRows($pdo, 'voicemail_users', ['extension', 'name', 'email', 'pager', 'options', 'saycid', 'envelope']) as $row) {
+        $module = $this->voicemailModule();
+        if ($module && method_exists($module, 'getVoicemail')) {
+            $contexts = $module->getVoicemail(false);
+            if (is_array($contexts)) {
+                foreach ($contexts as $context => $mailboxes) {
+                    if (in_array((string)$context, ['general', 'zonemessages', 'pbxaliases', 'device'], true) || !is_array($mailboxes)) continue;
+                    foreach ($mailboxes as $mailbox => $row) {
+                        if (!is_array($row)) continue;
+                        $extension = (string)($row['mailbox'] ?? $mailbox);
+                        if ($extension === '') continue;
+                        $row['vmcontext'] = (string)$context;
+                        $metadata = $this->normalizeVoicemailMailbox($row);
+                        unset($metadata['password']);
+                        $metadata['enabled'] = true;
+                        $items[$extension] = $metadata;
+                    }
+                }
+            }
+        }
+        if (!empty($items)) return $items;
+        foreach ($this->queryRows($pdo, 'voicemail_users', ['extension', 'name', 'email', 'pager', 'options', 'saycid', 'envelope', 'attach', 'delete', 'context']) as $row) {
             $extension = (string)($row['extension'] ?? '');
             if ($extension === '') continue;
-            $row['enabled'] = true;
-            $items[$extension] = $row;
+            $metadata = $this->normalizeVoicemailMailbox($row);
+            unset($metadata['password']);
+            $metadata['enabled'] = true;
+            $items[$extension] = $metadata;
         }
         return $items;
     }
