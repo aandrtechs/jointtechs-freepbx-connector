@@ -27,16 +27,19 @@ function jointtechsconnector_install_sync_cron()
     $moduleDir = __DIR__;
     $calls = $moduleDir . '/bin/sync-calls.php';
     $recordings = $moduleDir . '/bin/sync-recordings.php';
+    $inventory = $moduleDir . '/bin/sync-inventory.php';
     $heartbeat = $moduleDir . '/bin/heartbeat.php';
     $forwardExpiry = $moduleDir . '/bin/expire-forward.php';
     @chmod($calls, 0755);
     @chmod($recordings, 0755);
+    @chmod($inventory, 0755);
     @chmod($heartbeat, 0755);
     @chmod($forwardExpiry, 0755);
 
     $cron = <<<CRON
-*/5 * * * * asterisk php {$calls} >/dev/null 2>&1
-*/15 * * * * asterisk php {$recordings} >/dev/null 2>&1
+* * * * * asterisk php {$calls} >/dev/null 2>&1
+* * * * * asterisk php {$recordings} >/dev/null 2>&1
+13 2 * * * asterisk php {$inventory} >/dev/null 2>&1
 17 * * * * asterisk php {$heartbeat} >/dev/null 2>&1
 
 CRON;

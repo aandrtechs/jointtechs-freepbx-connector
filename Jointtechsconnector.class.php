@@ -5,7 +5,7 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '1.0.24';
+    private const MODULE_VERSION = '1.1.0';
     private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
     private const FORWARD_MARKER_FAMILY = 'JOINTTECHS_CF_EXPIRY';
 
@@ -108,6 +108,12 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
     {
         $this->autoRegisterWithPortal();
         return $this->syncRecordings();
+    }
+
+    public function runInventorySyncCli()
+    {
+        $this->autoRegisterWithPortal();
+        return $this->syncInventory();
     }
 
     public function getConnectorConfig()
@@ -239,14 +245,17 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         $moduleDir = __DIR__;
         $calls = $moduleDir . '/bin/sync-calls.php';
         $recordings = $moduleDir . '/bin/sync-recordings.php';
+        $inventory = $moduleDir . '/bin/sync-inventory.php';
         $heartbeat = $moduleDir . '/bin/heartbeat.php';
         $forwardExpiry = $moduleDir . '/bin/expire-forward.php';
         @chmod($calls, 0755);
         @chmod($recordings, 0755);
+        @chmod($inventory, 0755);
         @chmod($heartbeat, 0755);
         @chmod($forwardExpiry, 0755);
-        $cron = "*/5 * * * * asterisk php {$calls} >/dev/null 2>&1\n"
-            . "*/15 * * * * asterisk php {$recordings} >/dev/null 2>&1\n"
+        $cron = "* * * * * asterisk php {$calls} >/dev/null 2>&1\n"
+            . "* * * * * asterisk php {$recordings} >/dev/null 2>&1\n"
+            . "13 2 * * * asterisk php {$inventory} >/dev/null 2>&1\n"
             . "17 * * * * asterisk php {$heartbeat} >/dev/null 2>&1\n";
         @file_put_contents('/etc/cron.d/jointtechsconnector', $cron);
         @chmod('/etc/cron.d/jointtechsconnector', 0644);
@@ -357,6 +366,7 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
             'diskUsagePercent' => $this->diskUsagePercent('/'),
             'recordingDiskUsagePercent' => $this->diskUsagePercent($recordingsPath),
             'cdrColumns' => $this->safeCdrColumns(),
+            'capabilities' => ['faxTier' => $this->detectFaxTier(), 'webrtc' => $this->detectWebRtcCapability()],
         ];
         $this->postPortal('/api/pbx/heartbeat', $payload);
         $config['lastHeartbeatAt'] = gmdate('c');
@@ -373,10 +383,10 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         if (!in_array($permission, ['read', 'approved_fix', 'self_update'], true)) {
             return ['status' => false, 'errorCode' => 'permission_invalid', 'error' => 'Invalid task permission.'];
         }
-        if (in_array($command, ['set_temp_call_forward', 'clear_temp_call_forward', 'supervise_call'], true) && $permission !== 'approved_fix') {
+        if (in_array($command, ['set_temp_call_forward', 'clear_temp_call_forward', 'supervise_call', 'update_extension_settings', 'update_fax_route', 'send_fax', 'originate_call'], true) && $permission !== 'approved_fix') {
             return ['status' => false, 'errorCode' => 'permission_denied', 'error' => 'This task requires approved fix permission.'];
         }
-        if ($permission !== 'read' && $command !== 'self_update' && $command !== 'set_temp_call_forward' && $command !== 'clear_temp_call_forward' && $command !== 'supervise_call') {
+        if ($permission !== 'read' && $command !== 'self_update' && !in_array($command, ['set_temp_call_forward', 'clear_temp_call_forward', 'supervise_call', 'update_extension_settings', 'update_fax_route', 'send_fax', 'originate_call'], true)) {
             return ['status' => false, 'errorCode' => 'write_denied', 'error' => 'Only allowlisted approved fixes are supported.'];
         }
         if ($command === 'discover_system') return ['ok' => true, 'discovery' => $this->discoverSystem()];
@@ -387,11 +397,169 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
         if ($command === 'list_path') return $this->listApprovedPath($input);
         if ($command === 'fetch_file') return $this->fetchApprovedFile($input);
         if ($command === 'command_probe') return $this->runCommandProbe($input);
+        if ($command === 'get_extension_settings') return $this->getExtensionSettings($input);
+        if ($command === 'update_extension_settings') return $this->updateExtensionSettings($input);
+        if ($command === 'update_fax_route') return $this->updateFaxRoute($input);
+        if ($command === 'send_fax') return $this->sendFax($input);
+        if ($command === 'originate_call') return $this->originateCall($input);
         if ($command === 'set_temp_call_forward') return $this->setTempCallForward($input);
         if ($command === 'clear_temp_call_forward') return $this->clearTempCallForward($input);
         if ($command === 'supervise_call') return $this->superviseCall($input);
         if ($command === 'self_update') return $this->selfUpdate($input);
         return ['status' => false, 'errorCode' => 'task_unknown', 'error' => 'Unsupported agent task.'];
+    }
+
+    private function getExtensionSettings(array $input)
+    {
+        $extension = preg_replace('/[^0-9*#]/', '', (string)($input['extension'] ?? ''));
+        if ($extension === '') return ['status' => false, 'error' => 'Extension is required.'];
+        $pdo = $this->getAmpPdo();
+        $user = null;
+        foreach ($this->queryRows($pdo, 'users', ['extension', 'name', 'outboundcid']) as $row) {
+            if ((string)($row['extension'] ?? '') === $extension) { $user = $row; break; }
+        }
+        if (!$user) return ['status' => false, 'error' => 'Extension was not found.'];
+        $voicemail = null;
+        foreach ($this->queryRows($pdo, 'voicemail_users', ['extension', 'name', 'password', 'email', 'attach', 'delete']) as $row) {
+            if ((string)($row['extension'] ?? '') === $extension) { $voicemail = $row; break; }
+        }
+        return [
+            'status' => true, 'name' => (string)($user['name'] ?? $extension),
+            'outboundCid' => (string)($user['outboundcid'] ?? ''),
+            'voicemailEnabled' => (bool)$voicemail,
+            'voicemailPassword' => (string)($voicemail['password'] ?? ''),
+            'voicemailEmail' => (string)($voicemail['email'] ?? ''),
+            'emailAttachment' => $this->booleanValue($voicemail['attach'] ?? true),
+            'deleteAfterEmail' => $this->booleanValue($voicemail['delete'] ?? false),
+        ];
+    }
+
+    private function updateExtensionSettings(array $input)
+    {
+        $extension = preg_replace('/[^0-9*#]/', '', (string)($input['extension'] ?? ''));
+        $name = trim((string)($input['name'] ?? ''));
+        $password = preg_replace('/\D/', '', (string)($input['voicemailPassword'] ?? ''));
+        $email = trim((string)($input['voicemailEmail'] ?? ''));
+        $enabled = $this->booleanValue($input['voicemailEnabled'] ?? false);
+        if ($extension === '' || $name === '') return ['status' => false, 'error' => 'Extension and name are required.'];
+        if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL)) return ['status' => false, 'error' => 'Voicemail email is invalid.'];
+        if ($password !== '' && (strlen($password) < 3 || strlen($password) > 20)) return ['status' => false, 'error' => 'Voicemail password must contain 3 to 20 digits.'];
+        $pdo = $this->getAmpPdo();
+        $pdo->beginTransaction();
+        try {
+            $statement = $pdo->prepare('UPDATE users SET name = :name WHERE extension = :extension');
+            $statement->execute(['name' => $name, 'extension' => $extension]);
+            $check = $pdo->prepare('SELECT COUNT(*) FROM users WHERE extension = :extension');
+            $check->execute(['extension' => $extension]);
+            if (!(int)$check->fetchColumn()) throw new \RuntimeException('Extension was not found.');
+            if (!$enabled) {
+                $statement = $pdo->prepare('DELETE FROM voicemail_users WHERE extension = :extension');
+                $statement->execute(['extension' => $extension]);
+            } else {
+                $columns = $this->tableColumns($pdo, 'voicemail_users');
+                $values = ['context' => 'default', 'extension' => $extension, 'name' => $name, 'password' => $password ?: $extension, 'email' => $email, 'attach' => $this->booleanValue($input['emailAttachment'] ?? true) ? 'yes' : 'no', 'delete' => $this->booleanValue($input['deleteAfterEmail'] ?? false) ? 'yes' : 'no'];
+                $values = array_intersect_key($values, array_flip($columns));
+                $names = array_keys($values);
+                $sqlColumns = implode(', ', $names);
+                $placeholders = implode(', ', array_map(function ($column) { return ':' . $column; }, $names));
+                $updates = implode(', ', array_map(function ($column) { return $column . ' = VALUES(' . $column . ')'; }, array_diff($names, ['extension', 'context'])));
+                $statement = $pdo->prepare("INSERT INTO voicemail_users ({$sqlColumns}) VALUES ({$placeholders}) ON DUPLICATE KEY UPDATE {$updates}");
+                $statement->execute($values);
+            }
+            $pdo->commit();
+        } catch (\Throwable $exception) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            return ['status' => false, 'error' => $this->sanitizeMessage($exception->getMessage())];
+        }
+        $this->reloadFreePbx();
+        return ['status' => true, 'message' => 'Extension and voicemail settings updated.', 'extension' => $extension];
+    }
+
+    private function updateFaxRoute(array $input)
+    {
+        $number = preg_replace('/\D/', '', (string)($input['number'] ?? ''));
+        $recipients = isset($input['recipients']) && is_array($input['recipients']) ? array_values(array_unique(array_filter(array_map('trim', $input['recipients'])))) : [];
+        $tier = $this->detectFaxTier();
+        if (strlen($number) < 10 || strlen($number) > 11 || empty($recipients)) return ['status' => false, 'error' => 'Fax number and recipient are required.'];
+        foreach ($recipients as $email) if (!filter_var($email, FILTER_VALIDATE_EMAIL)) return ['status' => false, 'error' => 'A fax recipient email is invalid.'];
+        if ($tier !== 'pro' && count($recipients) !== 1) return ['status' => false, 'error' => 'Fax Regular supports exactly one recipient.'];
+        $pdo = $this->getAmpPdo();
+        if (!$this->tableExists($pdo, 'incoming')) return ['status' => false, 'error' => 'FreePBX inbound routes table was not found.'];
+        $columns = $this->tableColumns($pdo, 'incoming');
+        if (!in_array('faxemail', $columns, true) || !in_array('extension', $columns, true)) return ['status' => false, 'error' => 'FreePBX fax email fields are unavailable.'];
+        $statement = $pdo->prepare('UPDATE incoming SET faxemail = :email WHERE extension = :number');
+        $statement->execute(['email' => implode(',', $recipients), 'number' => $number]);
+        $check = $pdo->prepare('SELECT COUNT(*) FROM incoming WHERE extension = :number');
+        $check->execute(['number' => $number]);
+        if (!(int)$check->fetchColumn()) return ['status' => false, 'error' => 'Fax route was not found.'];
+        $this->reloadFreePbx();
+        return ['status' => true, 'message' => 'Incoming fax recipients updated.', 'tier' => $tier, 'recipientCount' => count($recipients)];
+    }
+
+    private function sendFax(array $input)
+    {
+        if ($this->detectFaxTier() !== 'pro') return ['status' => false, 'error' => 'Sending requires FreePBX Fax Pro.'];
+        $from = preg_replace('/\D/', '', (string)($input['from'] ?? ''));
+        $to = preg_replace('/\D/', '', (string)($input['to'] ?? ''));
+        $content = base64_decode((string)($input['contentBase64'] ?? ''), true);
+        $extension = strtolower(pathinfo((string)($input['fileName'] ?? 'fax.pdf'), PATHINFO_EXTENSION));
+        if (!in_array($extension, ['pdf', 'tif', 'tiff', 'jpg', 'jpeg', 'png'], true)) return ['status' => false, 'error' => 'Fax document type is not supported.'];
+        if (!$content || strlen($content) > 25 * 1024 * 1024 || strlen($from) < 10 || strlen($to) < 10) return ['status' => false, 'error' => 'Fax payload is invalid.'];
+        $directory = '/var/spool/asterisk/fax/jointtechs';
+        if (!is_dir($directory) && !@mkdir($directory, 0750, true)) return ['status' => false, 'error' => 'Fax spool directory could not be created.'];
+        $document = $directory . '/' . gmdate('YmdHis') . '-' . bin2hex(random_bytes(6)) . '.' . $extension;
+        if (@file_put_contents($document, $content, LOCK_EX) === false) return ['status' => false, 'error' => 'Fax document could not be written.'];
+        $result = $this->queueCallFile(['Channel: Local/' . $to . '@from-internal/n', 'CallerID: <' . $from . '>', 'MaxRetries: 2', 'RetryTime: 60', 'WaitTime: 60', 'Application: SendFAX', 'Data: ' . $document, 'Archive: yes'], 'fax');
+        if (!$result['status']) @unlink($document);
+        $result['jobId'] = basename($document);
+        return $result;
+    }
+
+    private function originateCall(array $input)
+    {
+        $source = preg_replace('/[^0-9*#]/', '', (string)($input['sourceExtension'] ?? ''));
+        $destination = preg_replace('/\D/', '', (string)($input['destination'] ?? ''));
+        $callerId = preg_replace('/\D/', '', (string)($input['callerId'] ?? ''));
+        if ($source === '' || $destination === '' || strlen($destination) > 11) return ['status' => false, 'error' => 'Call source or destination is invalid.'];
+        return $this->queueCallFile(['Channel: Local/' . $source . '@from-internal/n', 'CallerID: <' . ($callerId ?: $source) . '>', 'MaxRetries: 0', 'RetryTime: 30', 'WaitTime: 45', 'Context: from-internal', 'Extension: ' . $destination, 'Priority: 1', 'Setvar: JOINTTECHS_PORTAL_CALL=1', 'Archive: yes'], 'call');
+    }
+
+    private function queueCallFile(array $lines, $prefix)
+    {
+        $temporary = tempnam('/tmp', 'jtc_' . preg_replace('/[^a-z]/', '', (string)$prefix) . '_');
+        if (!$temporary || @file_put_contents($temporary, implode("\n", $lines) . "\n", LOCK_EX) === false) return ['status' => false, 'error' => 'Could not create Asterisk call file.'];
+        @chmod($temporary, 0640);
+        $target = '/var/spool/asterisk/outgoing/' . basename($temporary) . '.call';
+        if (!@rename($temporary, $target)) { @unlink($temporary); return ['status' => false, 'error' => 'Could not queue the Asterisk call file.']; }
+        return ['status' => true, 'message' => 'Call queued.', 'callId' => basename($target)];
+    }
+
+    private function detectFaxTier()
+    {
+        if (!function_exists('exec')) return 'regular';
+        $output = [];
+        @exec('fwconsole ma list 2>/dev/null', $output, $code);
+        return $code === 0 && preg_match('/^\s*faxpro\s+.*Enabled/im', implode("\n", $output)) ? 'pro' : 'regular';
+    }
+
+    private function detectWebRtcCapability()
+    {
+        if (!function_exists('exec')) return false;
+        $output = [];
+        @exec('asterisk -rx "http show status" 2>/dev/null', $output, $code);
+        return $code === 0 && stripos(implode("\n", $output), 'Enabled and Bound') !== false;
+    }
+
+    private function booleanValue($value)
+    {
+        if (is_bool($value)) return $value;
+        return in_array(strtolower(trim((string)$value)), ['1', 'yes', 'true', 'on', 'enabled'], true);
+    }
+
+    private function reloadFreePbx()
+    {
+        if (!function_exists('exec')) return;
+        @exec('fwconsole reload >/dev/null 2>&1', $output, $code);
     }
 
     private function setTempCallForward(array $input)
@@ -871,8 +1039,10 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
     private function syncInventory()
     {
         $items = $this->discoverInventory();
-        $this->postPortal('/api/pbx/sync/inventory', ['items' => $items]);
-        return ['ok' => true, 'count' => count($items), 'message' => count($items) . ' PBX inventory items synced.', 'types' => array_values(array_unique(array_map(function ($item) { return $item['type']; }, $items)))];
+        $types = array_values(array_unique(array_map(function ($item) { return $item['type']; }, $items)));
+        $capabilities = ['faxTier' => $this->detectFaxTier(), 'webrtc' => $this->detectWebRtcCapability()];
+        $this->postPortal('/api/pbx/sync/inventory', ['items' => $items, 'types' => $types, 'complete' => true, 'capabilities' => $capabilities]);
+        return ['ok' => true, 'count' => count($items), 'message' => count($items) . ' PBX inventory items synced.', 'types' => $types, 'capabilities' => $capabilities];
     }
 
     private function discoverInventory()
@@ -898,6 +1068,20 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
                 $number = (string)($row['grpnum'] ?? '');
                 if ($number === '') continue;
                 $items[] = ['type' => 'ring_group', 'objectId' => $number, 'number' => $number, 'name' => $row['description'] ?? ('Ring Group ' . $number), 'metadata' => $row];
+            }
+            $faxTier = $this->detectFaxTier();
+            foreach ($this->queryRows($pdo, 'incoming', ['cidnum', 'extension', 'destination', 'faxexten', 'faxemail', 'description']) as $row) {
+                $number = preg_replace('/\D/', '', (string)($row['extension'] ?? ''));
+                if (strlen($number) < 10 || strlen($number) > 11) continue;
+                $name = $row['description'] ?? ('Inbound route ' . $number);
+                $items[] = ['type' => 'inbound_route', 'objectId' => $number, 'number' => $number, 'name' => $name, 'metadata' => $row];
+                $faxEmail = trim((string)($row['faxemail'] ?? ''));
+                if ($faxEmail !== '' || !empty($row['faxexten'])) {
+                    $faxMetadata = $row;
+                    $faxMetadata['tier'] = $faxTier;
+                    $faxMetadata['recipients'] = array_values(array_filter(array_map('trim', preg_split('/[,;]/', $faxEmail))));
+                    $items[] = ['type' => 'fax_route', 'objectId' => $number, 'number' => $number, 'name' => $name, 'metadata' => $faxMetadata];
+                }
             }
             foreach ($this->queryRows($pdo, 'ivr_details', ['id', 'name', 'description', 'announcement']) as $row) {
                 $id = (string)($row['id'] ?? '');
@@ -1156,21 +1340,22 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
     {
         $config = $this->getConnectorConfig();
         $path = $this->detectRecordingsPath($config);
+        $last = !empty($config['lastRecordingSyncAt']) ? strtotime((string)$config['lastRecordingSyncAt']) : false;
+        $since = $last ? $last - 120 : time() - 86400 * 7;
         $recordings = [];
         if (is_dir($path)) {
             $iterator = new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($path, \FilesystemIterator::SKIP_DOTS));
             foreach ($iterator as $file) {
-                if (count($recordings) >= 200) break;
-                if ($file->isFile() && preg_match('/\.(wav|mp3|gsm)$/i', $file->getFilename())) {
-                    if ($file->getSize() <= 44) continue;
-                    $recordings[] = ['filePath' => $file->getPathname(), 'fileName' => $file->getFilename(), 'fileSizeBytes' => $file->getSize(), 'format' => strtolower($file->getExtension()), 'durationSeconds' => $this->recordingDurationSeconds($file->getPathname()), 'recordingStartedAt' => gmdate('c', $file->getMTime())];
-                }
+                if (count($recordings) >= 2000) break;
+                if (!$file->isFile() || $file->getMTime() < $since || !preg_match('/\.(wav|mp3|gsm|ogg|m4a)$/i', $file->getFilename()) || $file->getSize() <= 44) continue;
+                $recordings[] = ['filePath' => $file->getPathname(), 'fileName' => $file->getFilename(), 'fileSizeBytes' => $file->getSize(), 'format' => strtolower($file->getExtension()), 'durationSeconds' => $this->recordingDurationSeconds($file->getPathname()), 'recordingStartedAt' => gmdate('c', $file->getMTime())];
             }
         }
-        $this->postPortal('/api/pbx/sync/recordings', ['recordings' => $recordings]);
+        usort($recordings, function ($left, $right) { return strcmp($right['recordingStartedAt'], $left['recordingStartedAt']); });
+        $this->postPortal('/api/pbx/sync/recordings', ['recordings' => $recordings, 'since' => gmdate('c', $since)]);
         $config['lastRecordingSyncAt'] = gmdate('c');
         $this->setConnectorConfig($config);
-        return ['ok' => true, 'count' => count($recordings)];
+        return ['ok' => true, 'count' => count($recordings), 'since' => gmdate('c', $since)];
     }
 
     private function refreshRecording(array $payload)
