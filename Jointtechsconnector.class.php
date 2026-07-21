@@ -5,7 +5,7 @@ namespace FreePBX\modules;
 class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
 {
     private const CONFIG_KEY = 'JOINTTECHS_CONNECTOR_CONFIG';
-    private const MODULE_VERSION = '1.1.2';
+    private const MODULE_VERSION = '1.1.3';
     private const DEFAULT_PORTAL_URL = 'https://portal.joint.tech';
     private const FORWARD_MARKER_FAMILY = 'JOINTTECHS_CF_EXPIRY';
 
@@ -1299,8 +1299,15 @@ class Jointtechsconnector extends \FreePBX_Helpers implements \BMO
                 if ($extension === '') continue;
                 $metadata = $row;
                 $voicemailFlag = strtolower(trim((string)($row['voicemail'] ?? '')));
+                $voicemailEnabledByFlag = $voicemailFlag !== '' && !in_array($voicemailFlag, ['novm', 'disabled', 'no', 'false', '0'], true);
+                if ($voicemailEnabledByFlag && !isset($voicemailByExtension[$extension])) {
+                    $voicemailByExtension[$extension] = [
+                        'enabled' => true,
+                        'name' => (string)($row['name'] ?? $extension),
+                    ];
+                }
                 $metadata['voicemail'] = $voicemailByExtension[$extension]
-                    ?? ['enabled' => $voicemailFlag !== '' && !in_array($voicemailFlag, ['novm', 'disabled', 'no', 'false', '0'], true)];
+                    ?? ['enabled' => false];
                 $metadata['followMe'] = $followMeByExtension[$extension] ?? ['enabled' => false];
                 $metadata['callForwarding'] = $callForwardingByExtension[$extension] ?? [];
                 $metadata['endpointStatus'] = $endpointStatusByExtension[$extension] ?? ['state' => 'unknown', 'tech' => null];
